@@ -62,6 +62,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "encoding",
+            "in": "query",
+            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -71,6 +80,10 @@
               "application/octet-stream": {
                 "schema": {
                   "type": "string"
+                },
+                "example": {
+                  "report_data": "eHh4eA==",
+                  "svn": "1"
                 }
               }
             }
@@ -100,6 +113,15 @@
             "in": "query",
             "description": "Runtime Data",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "encoding",
+            "in": "query",
+            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "required": false,
             "schema": {
               "type": "string"
             }
