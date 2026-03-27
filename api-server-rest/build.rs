@@ -31,7 +31,8 @@ fn _token() {}
     get,
     path = "/aa/evidence",
     params(
-        ("runtime_data" = String, Query, description = "Runtime Data")
+        ("runtime_data" = String, Query, description = "Runtime Data"),
+        ("encoding" = Option<String>, Query, description = "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string")
     ),
     responses(
         (status = 200, description = "success response",
@@ -50,12 +51,14 @@ fn _evidence() {}
     get,
     path = "/aa/additional_evidence",
     params(
-        ("runtime_data" = String, Query, description = "Runtime Data")
+        ("runtime_data" = String, Query, description = "Runtime Data"),
+        ("encoding" = Option<String>, Query, description = "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string")
     ),
     responses(
         (status = 200, description = "success response",
                 content_type = "application/octet-stream",
-                body = String),
+                body = String,
+                example = json!({"svn":"1","report_data":"eHh4eA=="})),
         (status = 400, description = "bad request for invalid query param"),
         (status = 403, description = "forbid external access"),
         (status = 404, description = "resource not found"),

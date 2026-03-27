@@ -172,6 +172,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "form_urlencoded",
+ "hex",
  "hyper 0.14.32",
  "protos",
  "serde",
