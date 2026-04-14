@@ -4,6 +4,7 @@
 //
 
 use anyhow::*;
+use base64::Engine;
 use hyper::body::HttpBody;
 use hyper::{header, Body, Method, Request, Response, StatusCode};
 use serde::Serialize;
@@ -11,8 +12,24 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{debug, info};
 
+fn decode_runtime_data(raw: &str, encoding: Option<&str>) -> Result<Vec<u8>> {
+    match encoding {
+        Some("hex") => {
+            hex::decode(raw).map_err(|e| anyhow!("invalid hex in runtime_data: {e}"))
+        }
+        Some("base64") => base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .map_err(|e| anyhow!("invalid base64 in runtime_data: {e}")),
+        Some(other) => bail!("unsupported encoding: {other} (expected hex, base64, or omit)"),
+        None => Ok(raw.as_bytes().to_vec()),
+    }
+}
+
 use crate::client::{
-    aa::{AAClient, AaelEvent, AA_AAEL_URL, AA_EVIDENCE_URL, AA_ROOT, AA_TOKEN_URL},
+    aa::{
+        AAClient, AaelEvent, AA_AAEL_URL, AA_ADDITIONAL_EVIDENCE_URL, AA_EVIDENCE_URL, AA_ROOT,
+        AA_TOKEN_URL,
+    },
     cdh::{CDHClient, CDH_RESOURCE_URL, CDH_ROOT},
 };
 use crate::utils::split_nth_slash;
@@ -168,8 +185,36 @@ impl Router {
                             info!("Get evidence");
                             match params.get("runtime_data") {
                                 Some(runtime_data) => {
+                                    let data = match decode_runtime_data(
+                                        runtime_data,
+                                        params.get("encoding").map(|s| s.as_str()),
+                                    ) {
+                                        std::result::Result::Ok(d) => d,
+                                        Err(e) => return self.internal_error(e.to_string()),
+                                    };
+                                    match client.get_evidence(&data).await {
+                                        std::result::Result::Ok(results) => {
+                                            return self.octet_stream_response(results)
+                                        }
+                                        Err(e) => return self.internal_error(e.to_string()),
+                                    }
+                                }
+                                None => return self.bad_request(),
+                            }
+                        }
+                        (AA_ADDITIONAL_EVIDENCE_URL, &Method::GET) => {
+                            info!("Get additional evidence");
+                            match params.get("runtime_data") {
+                                Some(runtime_data) => {
+                                    let data = match decode_runtime_data(
+                                        runtime_data,
+                                        params.get("encoding").map(|s| s.as_str()),
+                                    ) {
+                                        std::result::Result::Ok(d) => d,
+                                        Err(e) => return self.internal_error(e.to_string()),
+                                    };
                                     match client
-                                        .get_evidence(&runtime_data.clone().into_bytes())
+                                        .get_additional_evidence(&data)
                                         .await
                                     {
                                         std::result::Result::Ok(results) => {
