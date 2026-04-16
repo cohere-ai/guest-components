@@ -1,0 +1,195 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Every Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to sync from (default: main)"
+        required: false
+        default: "main"
+      cohere_branch:
+        description: "Cohere branch to merge into"
+        required: false
+        default: "cohere"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  COHERE_BRANCH: ${{ inputs.cohere_branch || 'cohere' }}
+
+jobs:
+  # ── Step 1: fast-forward origin/main to match upstream/main ──────────────
+  sync-main:
+    runs-on: ubuntu-latest
+    outputs:
+      new_commits: ${{ steps.ff.outputs.new_commits }}
+      upstream_sha: ${{ steps.ff.outputs.upstream_sha }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fast-forward main to upstream
+        id: ff
+        run: |
+          git remote add upstream "$UPSTREAM_REPO" || true
+          git fetch upstream "$UPSTREAM_REF"
+
+          BEHIND=$(git rev-list --count HEAD..upstream/$UPSTREAM_REF)
+          UPSTREAM_SHA=$(git rev-parse --short upstream/$UPSTREAM_REF)
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "main is already up to date with upstream."
+            echo "new_commits=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          AHEAD=$(git rev-list --count upstream/$UPSTREAM_REF..HEAD)
+          if [ "$AHEAD" -ne 0 ]; then
+            echo "::error::origin/main is $AHEAD commits AHEAD of upstream — cannot fast-forward."
+            echo "::error::Remove the extra commits first (rebase or reset) before syncing."
+            exit 1
+          fi
+
+          git merge --ff-only upstream/$UPSTREAM_REF
+          git push origin main
+          echo "new_commits=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Fast-forwarded main by $BEHIND commits to $UPSTREAM_SHA"
+
+  # ── Step 2: merge updated main into the cohere branch via PR ─────────────
+  sync-cohere:
+    needs: sync-main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cohere branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COHERE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if cohere is behind main
+        id: check
+        run: |
+          git fetch origin main
+          BEHIND=$(git rev-list --count HEAD..origin/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Cohere branch is $BEHIND commits behind origin/main"
+
+          DATE=$(date +%Y-%m-%d)
+          SHORT_SHA=$(git rev-parse --short origin/main)
+          echo "sync_branch=sync/upstream-${DATE}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if up to date
+        if: steps.check.outputs.behind == '0'
+        run: echo "Cohere branch is already up to date with main. Nothing to do."
+
+      - name: Create sync branch and attempt merge
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          git checkout -b "${{ steps.check.outputs.sync_branch }}"
+
+          if git merge origin/main --no-edit \
+               -m "Merge main (${{ needs.sync-main.outputs.upstream_sha }}) into $COHERE_BRANCH"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo ""
+            echo "=== CONFLICT: listing conflicted files ==="
+            git diff --name-only --diff-filter=U
+            # Abort so the branch stays at the cohere HEAD — the reviewer
+            # will run the merge locally and get native Git conflict tooling.
+            git merge --abort
+          fi
+
+      - name: Push sync branch
+        if: steps.check.outputs.behind != '0'
+        run: git push origin "${{ steps.check.outputs.sync_branch }}"
+
+      - name: Create pull request (clean merge)
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          UPSTREAM_SHA=${{ needs.sync-main.outputs.upstream_sha }}
+
+          gh pr create \
+            --base "$COHERE_BRANCH" \
+            --head "${{ steps.check.outputs.sync_branch }}" \
+            --title "Sync upstream ($UPSTREAM_SHA) — $BEHIND new commits" \
+            --body "$(cat <<EOF
+          ## Upstream sync
+
+          Merges **${BEHIND}** new commits from \`main\` (synced from upstream) into \`$COHERE_BRANCH\`.
+
+          **Upstream HEAD**: \`${UPSTREAM_SHA}\`
+          **Conflicts**: None — clean merge.
+
+          ### Review checklist
+          - [ ] Scan the diff for changes that touch files we've customized
+          - [ ] Verify CI passes
+          - [ ] Check if any upstream changes obsolete our patches
+          EOF
+          )"
+
+      - name: Create pull request (conflicts)
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_SHA=${{ needs.sync-main.outputs.upstream_sha }}
+
+          gh pr create \
+            --base "$COHERE_BRANCH" \
+            --head "${{ steps.check.outputs.sync_branch }}" \
+            --title "Sync upstream ($UPSTREAM_SHA) — needs conflict resolution" \
+            --body "$(cat <<EOF
+          ## Upstream sync — manual merge needed
+
+          Upstream has new commits to merge into \`$COHERE_BRANCH\`, but there are conflicts.
+
+          **Upstream HEAD**: \`${UPSTREAM_SHA}\`
+
+          ### How to resolve
+
+          \`\`\`bash
+          git fetch origin
+          git checkout ${{ steps.check.outputs.sync_branch }}
+          git merge origin/main
+          # Git will show conflicts — resolve them in your IDE, then:
+          git add -A && git commit
+          git push origin ${{ steps.check.outputs.sync_branch }}
+          \`\`\`
+
+          Your IDE will show the native merge conflict UI with accept-theirs /
+          accept-ours / accept-both options for each conflict.
+
+          ### Review checklist
+          - [ ] Resolve all conflicts
+          - [ ] Verify CI passes
+          - [ ] Check if any upstream changes obsolete our patches
+          EOF
+          )"
