@@ -1,6 +1,10 @@
 name: Sync upstream
 
 on:
+  # TEMPORARY: testing on feature branch — remove before merging to cohere.
+  push:
+    branches:
+      - feat/sync-upstream-workflow
   schedule:
     # Every Monday at 09:00 UTC
     - cron: "0 9 * * 1"
@@ -15,9 +19,14 @@ on:
         required: false
         default: "cohere"
 
-permissions:
-  contents: write
-  pull-requests: write
+# Deny all permissions at the workflow level; jobs opt in explicitly below.
+permissions: {}
+
+# Only one sync workflow runs at a time — prevents racing pushes to main or
+# duplicate sync PRs if a manual dispatch overlaps the cron schedule.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 env:
   UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
@@ -27,22 +36,33 @@ env:
 jobs:
   # ── Step 1: fast-forward origin/main to match upstream/main ──────────────
   sync-main:
+    name: Fast-forward main from upstream
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the fast-forwarded main branch
     outputs:
       new_commits: ${{ steps.ff.outputs.new_commits }}
       upstream_sha: ${{ steps.ff.outputs.upstream_sha }}
+    # GH_TOKEN must be available to every step — `gh auth setup-git`
+    # registers `gh` as a git credential helper, and that helper shells
+    # out to `gh` at push-time, which reads $GH_TOKEN from the environment.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # zizmor: token is set up explicitly below via `gh auth setup-git`
+          # so it isn't persisted in .git/config after this step.
+          persist-credentials: false
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
 
       - name: Fast-forward main to upstream
         id: ff
@@ -50,8 +70,8 @@ jobs:
           git remote add upstream "$UPSTREAM_REPO" || true
           git fetch upstream "$UPSTREAM_REF"
 
-          BEHIND=$(git rev-list --count HEAD..upstream/$UPSTREAM_REF)
-          UPSTREAM_SHA=$(git rev-parse --short upstream/$UPSTREAM_REF)
+          BEHIND=$(git rev-list --count "HEAD..upstream/$UPSTREAM_REF")
+          UPSTREAM_SHA=$(git rev-parse --short "upstream/$UPSTREAM_REF")
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
 
           if [ "$BEHIND" -eq 0 ]; then
@@ -60,34 +80,46 @@ jobs:
             exit 0
           fi
 
-          AHEAD=$(git rev-list --count upstream/$UPSTREAM_REF..HEAD)
+          AHEAD=$(git rev-list --count "upstream/$UPSTREAM_REF..HEAD")
           if [ "$AHEAD" -ne 0 ]; then
             echo "::error::origin/main is $AHEAD commits AHEAD of upstream — cannot fast-forward."
             echo "::error::Remove the extra commits first (rebase or reset) before syncing."
             exit 1
           fi
 
-          git merge --ff-only upstream/$UPSTREAM_REF
+          git merge --ff-only "upstream/$UPSTREAM_REF"
           git push origin main
           echo "new_commits=$BEHIND" >> "$GITHUB_OUTPUT"
           echo "Fast-forwarded main by $BEHIND commits to $UPSTREAM_SHA"
 
   # ── Step 2: merge updated main into the cohere branch via PR ─────────────
   sync-cohere:
+    name: Merge main into cohere via PR
     needs: sync-main
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the sync/* branch
+      pull-requests: write # create the sync PR via `gh pr create`
+    # GH_TOKEN must be available to every step — `gh auth setup-git`
+    # registers `gh` as a git credential helper, and that helper shells
+    # out to `gh` at push-time, which reads $GH_TOKEN from the environment.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout cohere branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ env.COHERE_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # zizmor: token is set up explicitly below via `gh auth setup-git`
+          # so it isn't persisted in .git/config after this step.
+          persist-credentials: false
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
 
       - name: Check if cohere is behind main
         id: check
@@ -105,45 +137,58 @@ jobs:
         if: steps.check.outputs.behind == '0'
         run: echo "Cohere branch is already up to date with main. Nothing to do."
 
-      - name: Create sync branch and attempt merge
+      - name: Create sync branch and check for conflicts
         if: steps.check.outputs.behind != '0'
         id: merge
+        env:
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
         run: |
-          git checkout -b "${{ steps.check.outputs.sync_branch }}"
+          # The sync branch is created at origin/main so it's always ahead of
+          # cohere by $BEHIND commits. The PR merges this into cohere via the
+          # GitHub UI, which handles clean merges and surfaces conflicts
+          # natively — the merge commit is never pushed from CI.
+          # (If we instead tried to pre-merge in CI and aborted on conflict,
+          # the sync branch would equal cohere HEAD and `gh pr create` would
+          # fail with "No commits between cohere and <sync-branch>".)
+          git branch "$SYNC_BRANCH" origin/main
 
-          if git merge origin/main --no-edit \
-               -m "Merge main (${{ needs.sync-main.outputs.upstream_sha }}) into $COHERE_BRANCH"; then
+          # Preflight merge — purely to report conflict status in the PR body.
+          # Never committed or pushed; aborted either way.
+          if git merge --no-commit --no-ff origin/main; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             echo ""
             echo "=== CONFLICT: listing conflicted files ==="
             git diff --name-only --diff-filter=U
-            # Abort so the branch stays at the cohere HEAD — the reviewer
-            # will run the merge locally and get native Git conflict tooling.
-            git merge --abort
           fi
+          git merge --abort 2>/dev/null || true
 
       - name: Push sync branch
         if: steps.check.outputs.behind != '0'
-        run: git push origin "${{ steps.check.outputs.sync_branch }}"
+        env:
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
+        run: git push origin "$SYNC_BRANCH"
 
+      # PR creation uses SYNC_PAT because the cohere-ai org policy blocks
+      # GITHUB_TOKEN from creating pull requests. SYNC_PAT is a fine-grained
+      # PAT scoped to this repo with Contents:RW + Pull requests:RW.
       - name: Create pull request (clean merge)
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+          BEHIND: ${{ steps.check.outputs.behind }}
+          UPSTREAM_SHA: ${{ needs.sync-main.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
         run: |
-          BEHIND=${{ steps.check.outputs.behind }}
-          UPSTREAM_SHA=${{ needs.sync-main.outputs.upstream_sha }}
-
           gh pr create \
             --base "$COHERE_BRANCH" \
-            --head "${{ steps.check.outputs.sync_branch }}" \
+            --head "$SYNC_BRANCH" \
             --title "Sync upstream ($UPSTREAM_SHA) — $BEHIND new commits" \
             --body "$(cat <<EOF
           ## Upstream sync
 
-          Merges **${BEHIND}** new commits from \`main\` (synced from upstream) into \`$COHERE_BRANCH\`.
+          Merges **${BEHIND}** new commits from \`main\` (synced from upstream) into \`${COHERE_BRANCH}\`.
 
           **Upstream HEAD**: \`${UPSTREAM_SHA}\`
           **Conflicts**: None — clean merge.
@@ -158,34 +203,39 @@ jobs:
       - name: Create pull request (conflicts)
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+          UPSTREAM_SHA: ${{ needs.sync-main.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
         run: |
-          UPSTREAM_SHA=${{ needs.sync-main.outputs.upstream_sha }}
-
           gh pr create \
             --base "$COHERE_BRANCH" \
-            --head "${{ steps.check.outputs.sync_branch }}" \
+            --head "$SYNC_BRANCH" \
             --title "Sync upstream ($UPSTREAM_SHA) — needs conflict resolution" \
             --body "$(cat <<EOF
           ## Upstream sync — manual merge needed
 
-          Upstream has new commits to merge into \`$COHERE_BRANCH\`, but there are conflicts.
+          Upstream has new commits to merge into \`${COHERE_BRANCH}\`, but there are conflicts.
 
           **Upstream HEAD**: \`${UPSTREAM_SHA}\`
 
           ### How to resolve
 
+          The sync branch already contains the upstream commits (it points at
+          \`origin/main\`). To make it mergeable into \`${COHERE_BRANCH}\`,
+          merge cohere into the sync branch and resolve conflicts there:
+
           \`\`\`bash
           git fetch origin
-          git checkout ${{ steps.check.outputs.sync_branch }}
-          git merge origin/main
+          git checkout ${SYNC_BRANCH}
+          git merge origin/${COHERE_BRANCH}
           # Git will show conflicts — resolve them in your IDE, then:
           git add -A && git commit
-          git push origin ${{ steps.check.outputs.sync_branch }}
+          git push origin ${SYNC_BRANCH}
           \`\`\`
 
           Your IDE will show the native merge conflict UI with accept-theirs /
-          accept-ours / accept-both options for each conflict.
+          accept-ours / accept-both options for each conflict. Once the push
+          succeeds, the PR will become mergeable.
 
           ### Review checklist
           - [ ] Resolve all conflicts
