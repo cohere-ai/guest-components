@@ -12,10 +12,9 @@ use serde::Serialize;
 const NVIDIA_NONCE_SIZE: usize = 32;
 
 pub fn detect_platform() -> bool {
-    // Return true iff one GPU is found and it has CC mode set.
     match Nvml::init() {
         Ok(nvml) => {
-            nvml.device_count().is_ok_and(|count| count == 1)
+            nvml.device_count().is_ok_and(|count| count >= 1)
                 && nvml
                     .device_by_index(0)
                     .is_ok_and(|device| device.is_cc_enabled().unwrap_or_default())
