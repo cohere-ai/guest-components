@@ -15,7 +15,6 @@ use sigstore::{
         verification_constraint::{PublicKeyVerifier, VerificationConstraintVec},
         verify_constraints, ClientBuilder, CosignCapabilities,
     },
-    crypto::SigningScheme,
     errors::SigstoreVerifyConstraintsError,
     registry::{Auth, OciReference},
 };
@@ -82,7 +81,21 @@ impl CosignParameters {
                 payload.validate_signed_docker_reference(&image.reference, rule)?;
             }
 
-            payload.validate_signed_docker_manifest_digest(&image.manifest_digest.to_string())?;
+            if payload
+                .validate_signed_docker_manifest_digest(&image.manifest_digest.to_string())
+                .is_err()
+            {
+                // If the image manifest digest does not match the digest in the signature,
+                // and the image is a multi-arch image, check if the digest of the manifest list
+                // matches the signature.
+                if let Some(manifest_list_digest) = &image.manifest_list_digest {
+                    payload.validate_signed_docker_manifest_digest(
+                        &manifest_list_digest.to_string(),
+                    )?;
+                } else {
+                    bail!("Manifest digest does not match signature.");
+                }
+            }
         }
 
         Ok(())
@@ -163,10 +176,8 @@ impl CosignParameters {
             })
             .collect();
 
-        // By default, the hashing algorithm is SHA256
-        let pub_key_verifier =
-            PublicKeyVerifier::new(&key, &SigningScheme::ECDSA_P256_SHA256_ASN1)?;
-
+        let pub_key_verifier = PublicKeyVerifier::try_from(key.as_slice())
+            .map_err(|e| anyhow!("failed to build public key verifier: {e}"))?;
         let verification_constraints: VerificationConstraintVec = vec![Box::new(pub_key_verifier)];
 
         let res = verify_constraints(&signature_layers, verification_constraints.iter());
@@ -196,8 +207,46 @@ mod tests {
     };
 
     use oci_client::Reference;
+    use rsa::pkcs8::{EncodePublicKey, LineEnding};
+    use rsa::rand_core::OsRng;
+    use rsa::RsaPrivateKey;
     use rstest::rstest;
     use serial_test::serial;
+    use sigstore::crypto::SigningScheme;
+
+    #[test]
+    fn ecdsa_fixture_pubkey_matches_some_scheme() {
+        let path = format!(
+            "{}/test_data/signature/cosign/cosign1.pub",
+            std::env::current_dir()
+                .expect("cwd")
+                .to_str()
+                .expect("utf8")
+        );
+        let key = std::fs::read(path).expect("read ECDSA fixture");
+        assert!(
+            PublicKeyVerifier::try_from(key.as_slice()).is_ok(),
+            "ECDSA fixture pubkey should parse with PublicKeyVerifier::try_from",
+        );
+    }
+
+    #[test]
+    fn generated_rsa_pubkey_matches_some_scheme() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        let public_key = private_key.to_public_key();
+        let pem = public_key
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pem encode");
+        assert!(
+            PublicKeyVerifier::new(pem.as_bytes(), &SigningScheme::ECDSA_P256_SHA256_ASN1).is_err(),
+            "RSA pubkey must not parse as ECDSA P-256",
+        );
+        assert!(
+            PublicKeyVerifier::try_from(pem.as_bytes()).is_ok(),
+            "RSA pubkey should parse with PublicKeyVerifier::try_from",
+        );
+    }
 
     #[rstest]
     #[case(
@@ -319,7 +368,7 @@ mod tests {
         ),
         // The repository of the given image's and the Payload's are different
         "ghcr.io/confidential-containers/test-container-image-rs:cosign-signed",
-        "sha256:10e0ec4c7663b5f9be6efd16d8ceec760efe5377b9a0762ef3f51101ac08b7e8",
+        "sha256:4f926abc2dc7b29781fd7870c7c91a1550f390fc86e10b7b3d5fa795eb5a3d39",
         false,
         "Match reference failed.",
     )]
@@ -332,9 +381,9 @@ mod tests {
             std::env::current_dir().expect("get current dir").to_str().expect("get current dir")
         ),
         "ghcr.io/confidential-containers/test-container-image-rs:cosign-signed",
-        "sha256:10e0ec4c7663b5f9be6efd16d8ceec760efe5377b9a0762ef3f51101ac08b7e8",
+        "sha256:4f926abc2dc7b29781fd7870c7c91a1550f390fc86e10b7b3d5fa795eb5a3d39",
         false,
-        // If verified failed, the pubkey given to verify will be printed.
+        // Wrong key: only ECDSA P-256 schemes are tried for this SPKI.
         "[PublicKeyVerifier { key: ECDSA_P256_SHA256_ASN1(VerifyingKey { inner: PublicKey { point: AffinePoint { x: FieldElement(0x4D1167C9BBBCDB6CC1C867394D50C1777D5C2FCC46374E6B07819141E8D2CFAF), y: FieldElement(0xDB4E43CA897D2EE05C70836839AF5DBEE8B62EC4B93563FB044D92551FE33EEE), infinity: 0 } } }) }]"
     )]
     #[case(
@@ -349,7 +398,7 @@ mod tests {
             std::env::current_dir().expect("get current dir").to_str().expect("get current dir")
         ),
         "ghcr.io/confidential-containers/test-container-image-rs:cosign-signed",
-        "sha256:10e0ec4c7663b5f9be6efd16d8ceec760efe5377b9a0762ef3f51101ac08b7e8",
+        "sha256:4f926abc2dc7b29781fd7870c7c91a1550f390fc86e10b7b3d5fa795eb5a3d39",
         false,
         // Only MatchRepository and ExactRepository are supported.
         "Denied by MatchExact",
@@ -362,7 +411,7 @@ mod tests {
         }}", 
         std::env::current_dir().expect("get current dir").to_str().expect("get current dir")),
         "ghcr.io/confidential-containers/test-container-image-rs:cosign-signed",
-        "sha256:10e0ec4c7663b5f9be6efd16d8ceec760efe5377b9a0762ef3f51101ac08b7e8",
+        "sha256:4f926abc2dc7b29781fd7870c7c91a1550f390fc86e10b7b3d5fa795eb5a3d39",
         true,
         ""
     )]

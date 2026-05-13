@@ -3,17 +3,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::process::Stdio;
-
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
-use tokio::process::Command;
+use tracing::warn;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Copy, AsRefStr)]
+use crate::storage::drivers::run_command;
+
+const EXT4_COMMAND: &str = "mkfs.ext4";
+const DD_COMMAND: &str = "dd";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy, AsRefStr, Default)]
 pub enum FsType {
     #[strum(serialize = "ext4")]
     #[serde(rename = "ext4")]
+    #[default]
     Ext4,
 }
 
@@ -51,12 +55,22 @@ impl FsFormatter {
     /// ```
     ///
     /// Thus we need to get the block numbers and write to those blocks before hand.
-    pub async fn format_integrity_compatible(&self, device_path: &str) -> Result<()> {
+    pub fn format_integrity_compatible(&self, device_path: &str) -> Result<()> {
         let command = match self.fs_type {
-            FsType::Ext4 => "mkfs.ext4",
+            FsType::Ext4 => {
+                if !is_ext4_installed() {
+                    bail!("ext4 is not installed. Consider installing `e2fsprogs` (ubuntu).");
+                }
+                EXT4_COMMAND
+            }
         };
+
+        if !is_dd_installed() {
+            bail!("dd is not installed. Consider installing `coreutils` (ubuntu).");
+        }
+
         let args = vec!["-F", "-n", device_path];
-        let (stdout, stderr) = run_command(command, &args).await?;
+        let (stdout, stderr) = run_command(command, &args, None)?;
 
         // Get the block numbers
         let delimiter = "Superblock backups stored on blocks:";
@@ -87,7 +101,7 @@ impl FsFormatter {
 
         for num in nums {
             let _ = run_command(
-                "dd",
+                DD_COMMAND,
                 &[
                     "if=/dev/zero",
                     &format!("of={device_path}"),
@@ -96,53 +110,133 @@ impl FsFormatter {
                     "oflag=direct",
                     &format!("seek={num}"),
                 ],
-            )
-            .await?;
+                None,
+            )?;
         }
 
-        // then do original format command
-        self.format(device_path).await?;
+        // then do original format command with integrity-compatible defaults
+        let format_args = match self.fs_type {
+            FsType::Ext4 => disable_lazy_itable_init(&self.args),
+        };
+        self.format_with_args(device_path, &format_args)?;
 
         Ok(())
     }
 
-    pub async fn format(&self, device_path: &str) -> Result<()> {
+    pub fn format(&self, device_path: &str) -> Result<()> {
+        self.format_with_args(device_path, &self.args)
+    }
+
+    fn format_with_args(&self, device_path: &str, format_args: &[String]) -> Result<()> {
         let command = match self.fs_type {
-            FsType::Ext4 => "mkfs.ext4",
+            FsType::Ext4 => {
+                if !is_ext4_installed() {
+                    bail!("ext4 is not installed. Consider installing `e2fsprogs` (ubuntu).");
+                }
+                EXT4_COMMAND
+            }
         };
 
         let mut args = vec![device_path];
         if self.force {
             args.push("-F");
         }
-        for arg in &self.args {
+        for arg in format_args {
             args.push(arg);
         }
 
-        let _ = run_command(command, &args).await?;
+        let _ = run_command(command, &args, None)?;
 
         Ok(())
     }
 }
 
-/// Run a command and return the stdout and stderr.
-async fn run_command(command: &str, args: &[&str]) -> Result<(String, String)> {
-    let status = Command::new(command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .args(args)
-        .spawn()?;
+// Keep explicit caller choices, but default ext4 to eager inode table initialization.
+fn disable_lazy_itable_init(args: &[String]) -> Vec<String> {
+    let mut args = args.to_vec();
+    if args.iter().any(|arg| arg.contains("lazy_itable_init")) {
+        return args;
+    }
 
-    let output = status.wait_with_output().await?;
-    let stdout = String::from_utf8_lossy(&output.stdout).replace("\n", "\n\t");
-    let stderr = String::from_utf8_lossy(&output.stderr).replace("\n", "\n\t");
+    warn!(
+        "defaulting ext4 lazy_itable_init=0 for LUKS2 dm-integrity; set it explicitly in mkfsOpts to override"
+    );
 
-    if !output.status.success() {
-        bail!(
-            "Failed to run command {command} with args: {args:#?}\nstdout: {stdout}\nstderr: {stderr}",
+    if let Some(index) = args.iter().rposition(|arg| arg == "-E") {
+        if let Some(options) = args.get_mut(index + 1) {
+            options.push_str(",lazy_itable_init=0");
+            return args;
+        }
+    }
+
+    if let Some(options) = args
+        .iter_mut()
+        .rfind(|arg| arg.starts_with("-E") && arg.len() > 2)
+    {
+        options.push_str(",lazy_itable_init=0");
+        return args;
+    }
+
+    args.push("-E".to_string());
+    args.push("lazy_itable_init=0".to_string());
+    args
+}
+
+fn is_ext4_installed() -> bool {
+    let installed = run_command(EXT4_COMMAND, &["-V"], None).is_ok();
+    if !installed {
+        warn!("ext4 is not installed. Consider installing `e2fsprogs` (ubuntu).");
+    }
+    installed
+}
+
+fn is_dd_installed() -> bool {
+    let installed = run_command(DD_COMMAND, &["--version"], None).is_ok();
+    if !installed {
+        warn!("dd is not installed. Consider installing `coreutils` (ubuntu).");
+    }
+    installed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disable_lazy_itable_init;
+
+    #[test]
+    fn ext4_args_add_lazy_itable_init_when_missing() {
+        let args = vec!["-m".to_string(), "0".to_string()];
+        assert_eq!(
+            disable_lazy_itable_init(&args),
+            vec![
+                "-m".to_string(),
+                "0".to_string(),
+                "-E".to_string(),
+                "lazy_itable_init=0".to_string()
+            ]
         );
     }
 
-    Ok((stdout, stderr))
+    #[test]
+    fn ext4_args_merge_lazy_itable_init_into_separate_extended_options() {
+        let args = vec!["-E".to_string(), "nodiscard".to_string()];
+        assert_eq!(
+            disable_lazy_itable_init(&args),
+            vec!["-E".to_string(), "nodiscard,lazy_itable_init=0".to_string()]
+        );
+    }
+
+    #[test]
+    fn ext4_args_merge_lazy_itable_init_into_combined_extended_options() {
+        let args = vec!["-Enodiscard".to_string()];
+        assert_eq!(
+            disable_lazy_itable_init(&args),
+            vec!["-Enodiscard,lazy_itable_init=0".to_string()]
+        );
+    }
+
+    #[test]
+    fn ext4_args_keep_caller_lazy_itable_init() {
+        let args = vec!["-E".to_string(), "lazy_itable_init=1".to_string()];
+        assert_eq!(disable_lazy_itable_init(&args), args);
+    }
 }
