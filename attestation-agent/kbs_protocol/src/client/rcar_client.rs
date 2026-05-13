@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use canon_json::CanonicalFormatter;
 use kbs_types::HashAlgorithm;
 use kbs_types::{
     Attestation, Challenge, CompositeEvidence, ErrorInformation, InitData, Request, Response,
@@ -84,10 +83,7 @@ fn get_hash_algorithm(extra_params: serde_json::Value) -> Result<HashAlgorithm> 
 }
 
 fn serialize_json_canonically<T: Serialize>(value: T) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut ser = serde_json::Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-    value.serialize(&mut ser)?;
-    Ok(buf)
+    Ok(serde_json_canonicalizer::to_vec(&value)?)
 }
 
 async fn build_request(tee: Tee) -> Request {
@@ -168,25 +164,49 @@ impl KbsClient<Box<dyn EvidenceProvider>> {
 
         // Calculate the runtime data for the primary attester, which includes
         // the device evidence retrieved above.
+        let primary_runtime_data_json = json!({
+            "tee-pubkey": runtime_data.tee_pubkey,
+            "nonce": runtime_data.nonce,
+            "additional-evidence": additional_evidence,
+        });
+        let primary_runtime_data_serialized =
+            serialize_json_canonically(&primary_runtime_data_json)
+                .context("serialize runtime data failed")?;
+        let primary_runtime_digest = hash_algorithm.digest(&primary_runtime_data_serialized);
+
         let primary_runtime_data = match tee {
-            // SE handles the report data differently. As such, it does not support
-            // multi-device attestation.
+            // SE handles the report data differently. It:
+            // - does not support multi-device attestation.
+            // - injects runtime_data_digest into the request
+            // The injected data will be used in SE attester's get_evidence method.
             Tee::Se => {
                 if !additional_evidence.is_empty() {
                     bail!("Cannot attest multiple devices on s390x platform.")
                 }
-                runtime_data.nonce.into_bytes()
+
+                #[cfg(feature = "se-attester")]
+                {
+                    use attester::se::SeAttestationRequest;
+
+                    // Deserialize the nonce as SeAttestationRequest
+                    let mut request: SeAttestationRequest =
+                        serde_json::from_str(&runtime_data.nonce)
+                            .context("Failed to deserialize SeAttestationRequest from nonce")?;
+
+                    // Inject runtime_data_digest
+                    request.runtime_data_digest = Some(primary_runtime_digest);
+                    debug!("Injected runtime_data_digest into SE attestation request");
+
+                    // Serialize the modified request to pass to the attester
+                    serde_json::to_vec(&request)
+                        .context("Failed to serialize modified SeAttestationRequest")?
+                }
+                #[cfg(not(feature = "se-attester"))]
+                {
+                    bail!("Tee::Se requires se-attester feature to be enabled")
+                }
             }
-            _ => {
-                let primary_runtime_data = json!({
-                    "tee-pubkey": runtime_data.tee_pubkey,
-                    "nonce": runtime_data.nonce,
-                    "additional-evidence": additional_evidence,
-                });
-                let primary_runtime_data = serialize_json_canonically(&primary_runtime_data)
-                    .context("serialize runtime data failed")?;
-                hash_algorithm.digest(&primary_runtime_data)
-            }
+            _ => primary_runtime_digest,
         };
 
         let primary_evidence = self.provider.primary_evidence(primary_runtime_data).await?;
@@ -391,6 +411,7 @@ mod test {
         GenericImage, ImageExt,
     };
     use tokio::fs;
+    use tokio::io::AsyncBufReadExt;
 
     use crate::{
         evidence_provider::NativeEvidenceProvider, Error, KbsClientBuilder, KbsClientCapabilities,
@@ -412,12 +433,8 @@ mod test {
         let tmp = tempfile::tempdir().expect("create tempdir");
         let mut resource_path = PathBuf::new();
         resource_path.push(tmp.path());
-        resource_path.push("default/key");
-        fs::create_dir_all(resource_path.clone())
-            .await
-            .expect("create resource path");
+        resource_path.push("default\\x2Fkey\\x2Ftestfile");
 
-        resource_path.push("testfile");
         fs::write(resource_path.clone(), CONTENT)
             .await
             .expect("write content");
@@ -440,7 +457,7 @@ mod test {
         .with_exposed_port(8085.tcp())
         .with_mount(Mount::bind_mount(
             tmp.path().as_os_str().to_string_lossy(),
-            "/opt/confidential-containers/kbs/repository",
+            "/opt/confidential-containers/trustee/repository",
         ))
         .with_mount(Mount::bind_mount(
             start_kbs_script.into_os_string().to_string_lossy(),
@@ -452,12 +469,44 @@ mod test {
         ))
         .with_mount(Mount::bind_mount(
             policy.into_os_string().to_string_lossy(),
-            "/opa/confidential-containers/kbs/policy.rego",
+            "/opt/confidential-containers/trustee/kbs/resource-policy.rego",
         ))
+        .with_env_var("RUST_LOG", "debug")
         .with_cmd(vec!["/usr/local/bin/start_kbs.sh"])
         .start()
         .await
         .expect("run kbs failed");
+
+        let stdout = kbs.stdout(true);
+        let stderr = kbs.stderr(true);
+        let _stdout_log = tokio::spawn(async move {
+            let mut lines = stdout.lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => println!("[kbs container stdout] {line}"),
+                    Ok(None) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        eprintln!("[kbs container stdout] log stream error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+        let _stderr_log = tokio::spawn(async move {
+            let mut lines = stderr.lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => println!("[kbs container stderr] {line}"),
+                    Ok(None) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        eprintln!("[kbs container stderr] log stream error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
 
         tokio::time::sleep(Duration::from_secs(10)).await;
         let port = kbs.get_host_port_ipv4(8085).await.expect("get port");
