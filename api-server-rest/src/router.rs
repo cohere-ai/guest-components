@@ -14,9 +14,7 @@ use tracing::{debug, info};
 
 fn decode_runtime_data(raw: &str, encoding: Option<&str>) -> Result<Vec<u8>> {
     match encoding {
-        Some("hex") => {
-            hex::decode(raw).map_err(|e| anyhow!("invalid hex in runtime_data: {e}"))
-        }
+        Some("hex") => hex::decode(raw).map_err(|e| anyhow!("invalid hex in runtime_data: {e}")),
         Some("base64") => base64::engine::general_purpose::STANDARD
             .decode(raw)
             .map_err(|e| anyhow!("invalid base64 in runtime_data: {e}")),
@@ -213,10 +211,7 @@ impl Router {
                                         std::result::Result::Ok(d) => d,
                                         Err(e) => return self.internal_error(e.to_string()),
                                     };
-                                    match client
-                                        .get_additional_evidence(&data)
-                                        .await
-                                    {
+                                    match client.get_additional_evidence(&data).await {
                                         std::result::Result::Ok(results) => {
                                             return self.octet_stream_response(results)
                                         }
