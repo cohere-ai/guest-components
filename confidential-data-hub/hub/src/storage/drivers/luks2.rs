@@ -6,33 +6,33 @@
 
 //! # LUKS2
 //!
-//! This module leverages cryptsetup to encrypt/decrypt a block device with luks2.
+//! This module uses the `cryptsetup` binary to encrypt/decrypt a block device with LUKS2.
 //!
-//! It requires to install dependency `libcryptsetup-dev` for ubuntu.
+//! It requires the `cryptsetup` CLI to be installed (e.g. `cryptsetup-bin` on Debian/Ubuntu).
+//! No libcryptsetup-rs is linked, so the hub binary can be built as fully static.
 
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as b64, Engine};
 use const_format::concatcp;
-
-use crate::hub::CDH_BASE_DIR;
-use libcryptsetup_rs::consts::flags::{CryptActivate, CryptDeactivate, CryptVolumeKey};
-use libcryptsetup_rs::consts::vals::EncryptionFormat;
-use libcryptsetup_rs::{CryptInit, CryptParamsLuks2, CryptParamsLuks2Ref};
-use tracing::debug;
+use nix::mount::{mount, MsFlags};
+use serde::{Deserialize, Serialize};
+use tokio::fs::symlink;
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-/// Algorithm of the integrity hash
-const HMAC_SHA256: &str = "hmac(sha256)";
+use crate::hub::CDH_BASE_DIR;
+use crate::storage::drivers::filesystem::{FsFormatter, FsType};
+use crate::storage::drivers::run_command;
+use crate::storage::volume_type::blockdevice::SourceType;
 
-/// The volume key size in bits with integrity
-const LUKS2_VOLUME_KEY_SIZE_BIT_WITH_INTEGRITY: usize = 768;
-
-/// The volume key size in bits without integrity
-const LUKS2_VOLUME_KEY_SIZE_BIT_WITHOUT_INTEGRITY: usize = 256;
+/// Algorithm of the integrity hash (dm-integrity format name)
+const HMAC_SHA256: &str = "hmac-sha256";
 
 const SECTOR_SIZE: u32 = 4096;
+
+const CRYPTSETUP_BIN: &str = "cryptsetup";
 
 pub const LUKS_HEADERS_STORAGE_DIR: &str = concatcp!(CDH_BASE_DIR, "/luks-headers");
 pub const LUKS_HEADER_FILE_SUFFIX: &str = ".header";
@@ -52,14 +52,43 @@ pub fn prepare_luks_header_file(header_path: &str) -> std::io::Result<()> {
     if let Some(parent) = Path::new(header_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // error "LUKS header file not found: <path/to/header>" from libcryptsetup if header file doesn't exist.
     let file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(header_path)?;
-    // error "Device ... is too small" / OS error 5" from libcryptsetup if header isn't sized.
     file.set_len(LUKS2_HEADER_MIN_SIZE_BYTES)?;
     Ok(())
+}
+
+/// The type of the target mount point.
+#[derive(Serialize, Deserialize, PartialEq, Debug, Eq)]
+#[serde(tag = "targetType")]
+#[serde(rename_all = "camelCase")]
+pub enum TargetType {
+    /// The target is a device.
+    Device,
+
+    /// The target is a filesystem directory.
+    FileSystem {
+        /// The type of the target filesystem.
+        /// In some cases, the filesystem type is determined by the higher
+        /// level encryption_type ([`BlockDeviceEncryptType`]), so this
+        /// field will be optional.
+        #[serde(rename = "filesystemType")]
+        #[serde(default)]
+        filesystem_type: FsType,
+
+        /// Extra options passed verbatim to mkfs.<fs> when it is needed.
+        ///
+        /// For LUKS2 + dm-integrity + ext4 on an empty device, CDH adds
+        /// integrity-compatible ext4 defaults when the caller has not provided
+        /// an explicit setting. In particular, CDH defaults lazy_itable_init to
+        /// 0 to avoid lazy inode table writes against no-wipe dm-integrity
+        /// devices.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "mkfsOpts")]
+        mkfs_opts: Option<String>,
+    },
 }
 
 #[derive(Default)]
@@ -73,44 +102,46 @@ impl Luks2Formatter {
         self
     }
 
+    /// Encrypt (format) a block device as LUKS2 using the `cryptsetup` binary.
     pub fn encrypt_device(
         &self,
         device_path: &str,
         header_path: Option<&str>,
         passphrase: Zeroizing<Vec<u8>>,
     ) -> anyhow::Result<()> {
-        let mut device = init_device(device_path, header_path)?;
-        let mut volume_key_length = LUKS2_VOLUME_KEY_SIZE_BIT_WITHOUT_INTEGRITY / 8;
-        let mut params = CryptParamsLuks2 {
-            pbkdf: None,
-            integrity: None,
-            integrity_params: None,
-            data_alignment: 0,
-            data_device: None,
-            sector_size: SECTOR_SIZE,
-            label: None,
-            subsystem: None,
-        };
+        let sector_size_str = SECTOR_SIZE.to_string();
 
-        if self.integrity {
-            params.integrity = Some(HMAC_SHA256.to_string());
-            volume_key_length = LUKS2_VOLUME_KEY_SIZE_BIT_WITH_INTEGRITY / 8;
+        let mut args: Vec<&str> = vec![
+            "--batch-mode",
+            "luksFormat",
+            "--type",
+            "luks2",
+            "--cipher",
+            "aes-xts-plain64",
+            "--sector-size",
+            &sector_size_str,
+        ];
+
+        if let Some(h) = header_path {
+            args.push("--header");
+            args.push(h);
         }
 
-        device.context_handle().format(
-            EncryptionFormat::Luks2,
-            ("aes", "xts-plain"),
-            None,
-            libcryptsetup_rs::Either::Right(volume_key_length),
-            Some(&mut TryInto::<CryptParamsLuks2Ref>::try_into(&params)?),
-        )?;
+        if self.integrity {
+            args.push("--integrity");
+            args.push(HMAC_SHA256);
+            args.push("--integrity-no-wipe");
+            args.push("--integrity-no-journal");
+        }
 
-        device
-            .keyslot_handle()
-            .add_by_key(None, None, &passphrase, CryptVolumeKey::empty())?;
+        args.push(device_path);
+        args.push("-"); // read passphrase from stdin
+
+        run_cryptsetup_stdin(&args, &passphrase).context("cryptsetup luksFormat failed")?;
         Ok(())
     }
 
+    /// Open a LUKS2 device using the `cryptsetup` binary.
     pub fn open_device(
         &self,
         device_path: &str,
@@ -118,61 +149,206 @@ impl Luks2Formatter {
         name: &str,
         passphrase: Zeroizing<Vec<u8>>,
     ) -> anyhow::Result<()> {
-        let mut device = init_device(device_path, header_path)?;
+        let mut args: Vec<&str> = vec!["luksOpen", "-d", "-", device_path, name];
 
-        let mut params = CryptParamsLuks2 {
-            pbkdf: None,
-            integrity: None,
-            integrity_params: None,
-            data_alignment: 0,
-            data_device: None,
-            sector_size: SECTOR_SIZE,
-            label: None,
-            subsystem: None,
-        };
-
-        if self.integrity {
-            params.integrity = Some(HMAC_SHA256.to_string());
+        if let Some(h) = header_path {
+            args.insert(1, h);
+            args.insert(1, "--header");
         }
 
-        device
-            .context_handle()
-            .load(
-                Some(EncryptionFormat::Luks2),
-                Some(&mut TryInto::<CryptParamsLuks2Ref>::try_into(&params)?),
-            )
-            .context("Failed to load LUKS2 device")?;
-
-        debug!("activating device: {}", name);
-        // We use NO_JOURNAL for performance
-        device
-            .activate_handle()
-            .activate_by_passphrase(Some(name), None, &passphrase, CryptActivate::NO_JOURNAL)
-            .context("Failed to activate LUKS2 device")?;
+        run_cryptsetup_stdin(&args, &passphrase).context("cryptsetup luksOpen failed")?;
         debug!("device activated: {}", name);
         Ok(())
     }
 
+    /// Close a LUKS2 mapping using the `cryptsetup` binary.
     pub fn close_device(&self, name: &str) -> anyhow::Result<()> {
-        let mut device = CryptInit::init_by_name_and_header(name, None)?;
-        device
-            .activate_handle()
-            .deactivate(name, CryptDeactivate::empty())?;
+        let args = ["luksClose", name];
+        run_cryptsetup(&args).context("cryptsetup luksClose failed")?;
         Ok(())
     }
 }
 
-fn init_device(
-    device_path: &str,
-    header_path: Option<&str>,
-) -> anyhow::Result<libcryptsetup_rs::CryptDevice> {
-    let device_path = Path::new(device_path);
-    let device_paths = match header_path {
-        Some(header_path) => libcryptsetup_rs::Either::Right((Path::new(header_path), device_path)),
-        None => libcryptsetup_rs::Either::Left(device_path),
-    };
+/// Run cryptsetup with passphrase on stdin. Does not append newline.
+fn run_cryptsetup_stdin(args: &[&str], passphrase: &[u8]) -> anyhow::Result<()> {
+    let inputs = passphrase.to_vec();
+    let _ = run_command(CRYPTSETUP_BIN, args, Some(inputs))
+        .context("failed to run cryptsetup with stdin")?;
+    Ok(())
+}
 
-    Ok(CryptInit::init_with_data_device(device_paths)?)
+/// Run cryptsetup without stdin (e.g. luksClose).
+fn run_cryptsetup(args: &[&str]) -> anyhow::Result<()> {
+    let _ = run_command(CRYPTSETUP_BIN, args, None).context("failed to run cryptsetup")?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct Luks2MountParameters {
+    /// Indicates whether to enable dm-integrity.
+    ///
+    /// When this is true and CDH formats an empty ext4 filesystem, CDH uses
+    /// integrity-compatible formatting and applies ext4 safety defaults such as
+    /// lazy_itable_init=0 unless the caller explicitly provides that option in
+    /// mkfsOpts.
+    #[serde(rename = "dataIntegrity")]
+    #[serde(default)]
+    pub data_integrity: Option<String>,
+
+    /// Optional name for /dev/mapper/<name>
+    #[serde(rename = "mapperName")]
+    pub mapper_name: Option<String>,
+
+    /// The type of the target mount point.
+    /// Either `device` or `fileSystem`.
+    #[serde(rename = "targetType")]
+    #[serde(flatten)]
+    pub target_type: TargetType,
+}
+
+impl Luks2MountParameters {
+    /// Do the mount operation for the LUKS2 device.
+    /// Returns the header path if the source type is empty.
+    pub async fn do_mount(
+        self,
+        device_path: &str,
+        mount_point: &str,
+        key: Zeroizing<Vec<u8>>,
+        source_type: SourceType,
+    ) -> Result<Option<String>> {
+        let data_integrity = self.data_integrity.map(|s| s == "true").unwrap_or(false);
+        let formatter = Luks2Formatter::default().with_integrity(data_integrity);
+        // 3.1 if the source type is empty, encrypt the device and create detached header
+        let header_path = if source_type == SourceType::Empty {
+            warn!("encrypting the device. This will wipe original data on the disk.");
+            let header_path = luks_header_path(device_path);
+            prepare_luks_header_file(&header_path)?;
+            formatter
+                .encrypt_device(device_path, Some(&header_path), key.clone())
+                .context("Failed to encrypt LUKS2 device")?;
+            Some(header_path)
+        } else {
+            None
+        };
+
+        let devmapper_name = self.mapper_name.unwrap_or_else(|| {
+            debug!("No mapper name provided, generating a random one");
+            uuid::Uuid::new_v4().to_string()
+        });
+
+        debug!(device_path = device_path, "luks2 opening device");
+        formatter
+            .open_device(device_path, header_path.as_deref(), &devmapper_name, key)
+            .context("Failed to open LUKS2 device")?;
+
+        let dev_path = format!("/dev/mapper/{}", devmapper_name);
+        match (self.target_type, source_type) {
+            // 3.2 if the target type is device, do the symlink operation to map
+            // the device path to the mount point.
+            (TargetType::Device, _) => {
+                info!(
+                    "symlinking device: {} to mount point: {}",
+                    dev_path, mount_point
+                );
+                symlink(&dev_path, mount_point).await.with_context(|| {
+                    format!(
+                        "Failed to create symlink from {} to {}",
+                        dev_path, mount_point
+                    )
+                })?;
+                debug!(mount_point = mount_point, "created symlink");
+            }
+            // 3.3 if the source type is encrypted, meaning that there is
+            // already a filesystem on the device, so we just need to mount it to the mount point.
+            (
+                TargetType::FileSystem {
+                    filesystem_type, ..
+                },
+                SourceType::Encrypted,
+            ) => {
+                info!(
+                    "mounting device: {} to mount point: {}",
+                    dev_path, mount_point
+                );
+                mount::<_, _, str, _>(
+                    Some(&dev_path[..]),
+                    mount_point,
+                    Some(filesystem_type.as_ref()),
+                    MsFlags::MS_NOATIME,
+                    Some(""),
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to mount device {} to mount point {}",
+                        dev_path, mount_point
+                    )
+                })?;
+
+                debug!(mount_point = mount_point, "mounted device");
+            }
+            // 3.4 if the source type is empty, meaning that we should also make
+            // a filesystem on the device.
+            (
+                TargetType::FileSystem {
+                    filesystem_type,
+                    mkfs_opts,
+                },
+                SourceType::Empty,
+            ) => {
+                info!(
+                    "formatting device: {} and mounting it to mount point: {}",
+                    dev_path, mount_point
+                );
+                let args = mkfs_opts
+                    .map(|s| {
+                        s.split_ascii_whitespace()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                debug!(
+                    device_path = dev_path,
+                    filesystem_type = ?filesystem_type,
+                    args = ?args,
+                    "formatting device"
+                );
+                let fs_formatter = FsFormatter {
+                    fs_type: filesystem_type,
+                    force: true,
+                    args,
+                };
+
+                let format_result = if data_integrity {
+                    fs_formatter.format_integrity_compatible(&dev_path)
+                } else {
+                    fs_formatter.format(&dev_path)
+                };
+                format_result.with_context(|| {
+                    format!(
+                        "Failed to make filesystem {:?} of device {}",
+                        filesystem_type, dev_path
+                    )
+                })?;
+
+                debug!(device_path = dev_path, "mounting device");
+                mount(
+                    Some(&dev_path[..]),
+                    mount_point,
+                    Some(filesystem_type.as_ref()),
+                    MsFlags::MS_NOATIME,
+                    Some(""),
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to mount device {} to mount point {}",
+                        dev_path, mount_point
+                    )
+                })?;
+                debug!(mount_point = mount_point, "mounted device");
+            }
+        }
+        Ok(header_path)
+    }
 }
 
 #[cfg(test)]
@@ -350,7 +526,7 @@ mod tests {
 
     #[test]
     fn prepare_luks_header_file_rejects_existing_path() {
-        use rand::{distr::Alphanumeric, rng, Rng};
+        use rand::{distr::Alphanumeric, rng, RngExt};
 
         let path_str = format!(
             "/dev/{}",

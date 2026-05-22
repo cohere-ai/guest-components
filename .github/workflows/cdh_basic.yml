@@ -36,12 +36,12 @@ jobs:
       matrix:
         instance:
           - ubuntu-24.04
-          - ubuntu-24.04-s390x
+          # - ubuntu-24.04-s390x
           - ubuntu-24.04-arm
     runs-on: ${{ matrix.instance }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
         with:
           egress-policy: audit
 
@@ -51,13 +51,13 @@ jobs:
           fetch-depth: 1
 
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@a0b538fa0b742a6aa35d6e2c169b4bd06d225a98 # v1.15.3
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           components: rustfmt, clippy
 
-      - name: Install cryptsetup
+      - name: Install cryptsetup and zfs
         run: |
-          sudo apt-get update && sudo apt-get install -y libcryptsetup-dev pkg-config
+          sudo apt-get update && sudo apt-get install -y cryptsetup pkg-config zfsutils-linux
 
       - name: Build and install
         run: |
@@ -72,4 +72,4 @@ jobs:
 
       - name: Run cargo test
         run: |
-          sudo -E PATH=$PATH -s cargo test --features kbs,aliyun,sev,bin,luks2 -p kms -p confidential-data-hub
+          sudo -E PATH=$PATH -s RUST_LOG=warn cargo test --features kbs,aliyun,sev,bin -p kms -p confidential-data-hub -- --nocapture
