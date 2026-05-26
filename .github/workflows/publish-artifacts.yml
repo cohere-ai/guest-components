@@ -4,6 +4,8 @@ on:
   push:
     branches:
     - main
+    - cohere
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +30,10 @@ jobs:
           { tee: cca,         arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
           { tee: se,          arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
           { tee: none,        arch: powerpc64le,  libc: gnu, runner: ubuntu-24.04-ppc64le },
+          # Cohere fork: AA with combined TDX + NVIDIA GPU attesters. libnvat.so
+          # is a C++ shared library (NVIDIA attestation-sdk-cpp) so this variant
+          # must use gnu libc, and the resulting tarball bundles libnvat.so*.
+          { tee: tdx-nvidia,  arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
         ]
     runs-on: ${{ matrix.platform.runner }}
     env:
@@ -68,12 +74,33 @@ jobs:
       run: |
         sudo apt-get install -y --no-install-recommends libtss2-dev
 
+    - name: Build and install NVIDIA attestation-sdk (libnvat)
+      if: matrix.platform.tee == 'tdx-nvidia'
+      env:
+        NV_ATTESTATION_SDK_REF: "2026.03.02"
+      run: |
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake protobuf-compiler pkg-config clang libssl-dev
+        git clone --depth=1 --branch "${NV_ATTESTATION_SDK_REF}" \
+          https://github.com/NVIDIA/attestation-sdk /tmp/nv-attestation-sdk
+        cmake -S /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp \
+          -B /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_TESTING=OFF
+        sudo cmake --build /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build \
+          --target install --parallel "$(nproc)"
+        sudo ldconfig
+        rm -rf /tmp/nv-attestation-sdk
+
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Build AA
       env:
         ARCH: ${{ matrix.platform.arch }}
         LIBC: ${{ matrix.platform.libc }}
+        NVAT_USE_SYSTEM_LIB: ${{ matrix.platform.tee == 'tdx-nvidia' && '1' || '' }}
       run: |
         make ./target/${{ env.RUST_TARGET }}/release/attestation-agent
 
@@ -85,7 +112,21 @@ jobs:
         mkdir oras
         cd oras
         cp ../target/${{ env.RUST_TARGET }}/release/attestation-agent .
-        tar cJf attestation-agent.tar.xz attestation-agent
+        # For the tdx-nvidia variant, AA dynamically links against libnvat.so
+        # (NVIDIA attestation-sdk-cpp). Bundle the shared library + its
+        # symlinks into lib/ so consumers can install it alongside the binary.
+        if [ "${{ matrix.platform.tee }}" = "tdx-nvidia" ]; then
+          mkdir -p lib
+          find /usr/lib /usr/lib64 -maxdepth 3 -name 'libnvat.so*' \
+            -exec cp -a {} lib/ \;
+          if ! compgen -G "lib/libnvat.so*" >/dev/null; then
+            echo "ERROR: libnvat.so not found after attestation-sdk install" >&2
+            exit 1
+          fi
+          tar cJf attestation-agent.tar.xz attestation-agent lib
+        else
+          tar cJf attestation-agent.tar.xz attestation-agent
+        fi
         arch="${{ matrix.platform.arch }}"
         # After building for target powerpc64le, tag and push the image as ppc64le to match standard arch naming.
         [ "$arch" = "powerpc64le" ] && arch="ppc64le"
