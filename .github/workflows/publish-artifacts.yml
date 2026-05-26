@@ -21,12 +21,9 @@ jobs:
       matrix:
         platform: [
           { tee: none,        arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: none,        arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
-          { tee: none,        arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
           { tee: amd,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
           { tee: az-cvm-vtpm, arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
           { tee: tdx,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: none,        arch: powerpc64le,  libc: gnu, runner: ubuntu-24.04-ppc64le },
           # Cohere fork: AA with combined TDX + NVIDIA GPU attesters. libnvat.so
           # is a C++ shared library (NVIDIA attestation-sdk-cpp) so this variant
           # must use gnu libc, and the resulting tarball bundles libnvat.so*.
@@ -169,22 +166,10 @@ jobs:
       matrix:
         arch:
         - x86_64
-        - s390x
-        - aarch64
-        - powerpc64le
         include:
         - arch: x86_64
           libc: musl
           instance: ubuntu-24.04
-        - arch: s390x
-          libc: gnu
-          instance: ubuntu-24.04-s390x
-        - arch: aarch64
-          libc: gnu
-          instance: ubuntu-24.04-arm
-        - arch: powerpc64le
-          libc: gnu
-          instance: ubuntu-24.04-ppc64le
     runs-on: ${{ matrix.instance }}
     env:
       LIBC: ${{ matrix.libc }}
