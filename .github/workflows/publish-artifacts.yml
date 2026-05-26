@@ -78,6 +78,12 @@ jobs:
       if: matrix.platform.tee == 'tdx-nvidia'
       env:
         NV_ATTESTATION_SDK_REF: "2026.03.02"
+        # setup-rust-toolchain sets RUSTFLAGS=-D warnings, which turns new
+        # rustc lints into hard errors when cmake's ExternalProject builds
+        # the bundled regorus crate (e.g. mismatched_lifetime_syntaxes on
+        # rustc 1.83+). Clear it so the third-party crate compiles with its
+        # own lint policy.
+        RUSTFLAGS: ""
       run: |
         sudo apt-get install -y --no-install-recommends \
           build-essential cmake protobuf-compiler pkg-config clang libssl-dev
