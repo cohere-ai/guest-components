@@ -77,7 +77,9 @@ jobs:
     - name: Build and install NVIDIA attestation-sdk (libnvat)
       if: matrix.platform.tee == 'tdx-nvidia'
       env:
-        NV_ATTESTATION_SDK_REF: "2026.03.02"
+        # Pinned to the commit currently tagged 2026.03.02 so the build
+        # cannot be affected by a force-pushed/retagged upstream release.
+        NV_ATTESTATION_SDK_REF: "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3"
         # setup-rust-toolchain sets RUSTFLAGS=-D warnings, which turns new
         # rustc lints into hard errors when cmake's ExternalProject builds
         # the bundled regorus crate (e.g. mismatched_lifetime_syntaxes on
@@ -87,8 +89,8 @@ jobs:
       run: |
         sudo apt-get install -y --no-install-recommends \
           build-essential cmake protobuf-compiler pkg-config clang libssl-dev
-        git clone --depth=1 --branch "${NV_ATTESTATION_SDK_REF}" \
-          https://github.com/NVIDIA/attestation-sdk /tmp/nv-attestation-sdk
+        git clone https://github.com/NVIDIA/attestation-sdk /tmp/nv-attestation-sdk
+        git -C /tmp/nv-attestation-sdk checkout "${NV_ATTESTATION_SDK_REF}"
         BUILD_DIR=/tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build
         cmake -S /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp -B "$BUILD_DIR" \
           -DCMAKE_BUILD_TYPE=Release \
@@ -103,8 +105,6 @@ jobs:
         sudo cmake --install "$BUILD_DIR"
         sudo ldconfig
         rm -rf /tmp/nv-attestation-sdk
-
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Build AA
       env:
@@ -127,7 +127,9 @@ jobs:
         # symlinks into lib/ so consumers can install it alongside the binary.
         if [ "${{ matrix.platform.tee }}" = "tdx-nvidia" ]; then
           mkdir -p lib
-          find /usr/lib /usr/lib64 -maxdepth 3 -name 'libnvat.so*' \
+          # cmake installs libnvat with CMAKE_INSTALL_PREFIX=/usr, so the
+          # library lands in /usr/lib on Ubuntu (no /usr/lib64 on multiarch).
+          find /usr/lib -maxdepth 3 -name 'libnvat.so*' \
             -exec cp -a {} lib/ \;
           if ! compgen -G "lib/libnvat.so*" >/dev/null; then
             echo "ERROR: libnvat.so not found after attestation-sdk install" >&2
