@@ -83,14 +83,18 @@ jobs:
           build-essential cmake protobuf-compiler pkg-config clang libssl-dev
         git clone --depth=1 --branch "${NV_ATTESTATION_SDK_REF}" \
           https://github.com/NVIDIA/attestation-sdk /tmp/nv-attestation-sdk
-        cmake -S /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp \
-          -B /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build \
+        BUILD_DIR=/tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build
+        cmake -S /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp -B "$BUILD_DIR" \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=/usr \
           -DBUILD_EXAMPLES=OFF \
           -DBUILD_TESTING=OFF
-        sudo cmake --build /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build \
-          --target install --parallel "$(nproc)"
+        # Build as runner so cargo's bundled regorus build does not produce
+        # root-owned artifacts that the cleanup `rm -rf` can no longer remove
+        # (and don't pollute /tmp ownership for downstream steps). Only the
+        # install step needs sudo, since it writes to /usr.
+        cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+        sudo cmake --install "$BUILD_DIR"
         sudo ldconfig
         rm -rf /tmp/nv-attestation-sdk
 
