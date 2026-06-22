@@ -31,7 +31,8 @@ concurrency:
 env:
   UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
   UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
-  COHERE_BRANCH: ${{ inputs.cohere_branch || 'cohere' }}
+  # TEMPORARY: test target — restore to 'cohere' before merging to cohere.
+  COHERE_BRANCH: ${{ inputs.cohere_branch || 'vijay/sync-cohere-test' }}
 
 jobs:
   # ── Step 1: fast-forward origin/main to match upstream/main ──────────────
