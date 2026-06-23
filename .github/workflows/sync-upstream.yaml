@@ -1,10 +1,6 @@
 name: Sync upstream
 
 on:
-  # TEMPORARY: testing on feature branch — remove before merging to cohere.
-  push:
-    branches:
-      - vijay/sync-upstream
   schedule:
     # Every Monday at 09:00 UTC
     - cron: "0 9 * * 1"
@@ -31,8 +27,7 @@ concurrency:
 env:
   UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
   UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
-  # TEMPORARY: test target — restore to 'cohere' before merging to cohere.
-  COHERE_BRANCH: ${{ inputs.cohere_branch || 'vijay/sync-cohere-test' }}
+  COHERE_BRANCH: ${{ inputs.cohere_branch || 'cohere' }}
 
 jobs:
   # ── Step 1: fast-forward origin/main to match upstream/main ──────────────
