@@ -1,0 +1,281 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Every Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to sync from (default: main)"
+        required: false
+        default: "main"
+      cohere_branch:
+        description: "Cohere branch to merge into"
+        required: false
+        default: "cohere"
+
+# Deny all permissions at the workflow level; jobs opt in explicitly below.
+permissions: {}
+
+# Only one sync workflow runs at a time — prevents racing pushes to main or
+# duplicate sync PRs if a manual dispatch overlaps the cron schedule.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  COHERE_BRANCH: ${{ inputs.cohere_branch || 'cohere' }}
+
+jobs:
+  # ── Step 1: fast-forward origin/main to match upstream/main ──────────────
+  sync-main:
+    name: Fast-forward main from upstream
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the fast-forwarded main branch
+    outputs:
+      new_commits: ${{ steps.ff.outputs.new_commits }}
+      upstream_sha: ${{ steps.ff.outputs.upstream_sha }}
+    steps:
+      # The default GITHUB_TOKEN cannot push to .github/workflows/ files, and
+      # main is protected by branch protection. We mint a short-lived token from
+      # the guest-components-upstream-sync GitHub App, which has Workflows:
+      # write and is a bypass actor on the main branch protection.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: Checkout main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          # zizmor: token is set up explicitly below via `gh auth setup-git`
+          # so it isn't persisted in .git/config after this step.
+          persist-credentials: false
+
+      - name: Configure git
+        # The App token is set per-step (it's a step output, so it can't live
+        # at job level). `gh auth setup-git` registers gh as a git credential
+        # helper, which reads $GH_TOKEN at push-time.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+      - name: Fast-forward main to upstream
+        id: ff
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git remote add upstream "$UPSTREAM_REPO" || true
+          git fetch upstream "$UPSTREAM_REF"
+
+          BEHIND=$(git rev-list --count "HEAD..upstream/$UPSTREAM_REF")
+          UPSTREAM_SHA=$(git rev-parse --short "upstream/$UPSTREAM_REF")
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "main is already up to date with upstream."
+            echo "new_commits=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          AHEAD=$(git rev-list --count "upstream/$UPSTREAM_REF..HEAD")
+          if [ "$AHEAD" -ne 0 ]; then
+            echo "::error::origin/main is $AHEAD commits AHEAD of upstream — cannot fast-forward."
+            echo "::error::Remove the extra commits first (rebase or reset) before syncing."
+            exit 1
+          fi
+
+          git merge --ff-only "upstream/$UPSTREAM_REF"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          echo "new_commits=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Fast-forwarded main by $BEHIND commits to $UPSTREAM_SHA"
+
+  # ── Step 2: merge updated main into the cohere branch via PR ─────────────
+  sync-cohere:
+    name: Merge main into cohere via PR
+    needs: sync-main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the sync/* branch
+      pull-requests: write # create the sync PR via `gh pr create`
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: Checkout cohere branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.COHERE_BRANCH }}
+          fetch-depth: 0
+          # zizmor: token is set up explicitly below via `gh auth setup-git`
+          # so it isn't persisted in .git/config after this step.
+          persist-credentials: false
+
+      - name: Configure git
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+      - name: Check if cohere is behind main
+        id: check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git fetch origin main
+          BEHIND=$(git rev-list --count HEAD..origin/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Cohere branch is $BEHIND commits behind origin/main"
+
+          DATE=$(date +%Y-%m-%d)
+          SHORT_SHA=$(git rev-parse --short origin/main)
+          echo "sync_branch=sync/upstream-${DATE}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing sync PR
+        id: existing_pr
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Idempotency guard. Any open PR into $COHERE_BRANCH whose head branch
+          # starts with `sync/upstream-` means a previous run already produced a
+          # sync that's still awaiting review. We match by head prefix + base
+          # rather than the exact branch name: the name embeds today's date, so
+          # an exact match would miss a still-open PR from an earlier day and
+          # create a duplicate. Re-creating would also fail with "a pull request
+          # already exists" or a non-fast-forward push. Skip in that case.
+          COUNT=$(gh pr list --state open --base "$COHERE_BRANCH" \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("sync/upstream-"))] | length')
+          if [ "$COUNT" -gt 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "An open upstream-sync PR into $COHERE_BRANCH already exists — skipping push + PR creation."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if up to date
+        if: steps.check.outputs.behind == '0'
+        run: echo "Cohere branch is already up to date with main. Nothing to do."
+
+      - name: Create sync branch and check for conflicts
+        if: steps.check.outputs.behind != '0' && steps.existing_pr.outputs.exists == 'false'
+        id: merge
+        env:
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
+        run: |
+          # The sync branch is created at origin/main so it's always ahead of
+          # cohere by $BEHIND commits. The PR merges this into cohere via the
+          # GitHub UI, which handles clean merges and surfaces conflicts
+          # natively — the merge commit is never pushed from CI.
+          # (If we instead tried to pre-merge in CI and aborted on conflict,
+          # the sync branch would equal cohere HEAD and `gh pr create` would
+          # fail with "No commits between cohere and <sync-branch>".)
+          git branch "$SYNC_BRANCH" origin/main
+
+          # Preflight merge — purely to report conflict status in the PR body.
+          # Never committed or pushed; aborted either way.
+          if git merge --no-commit --no-ff origin/main; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo ""
+            echo "=== CONFLICT: listing conflicted files ==="
+            git diff --name-only --diff-filter=U
+          fi
+          git merge --abort 2>/dev/null || true
+
+      - name: Push sync branch
+        if: steps.check.outputs.behind != '0' && steps.existing_pr.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
+        run: git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$SYNC_BRANCH"
+
+      - name: Create pull request (clean merge)
+        if: steps.check.outputs.behind != '0' && steps.existing_pr.outputs.exists == 'false' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BEHIND: ${{ steps.check.outputs.behind }}
+          UPSTREAM_SHA: ${{ needs.sync-main.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
+        run: |
+          gh pr create \
+            --base "$COHERE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync upstream ($UPSTREAM_SHA) — $BEHIND new commits" \
+            --body "$(cat <<EOF
+          ## Upstream sync
+
+          Merges **${BEHIND}** new commits from \`main\` (synced from upstream) into \`${COHERE_BRANCH}\`.
+
+          **Upstream HEAD**: \`${UPSTREAM_SHA}\`
+          **Conflicts**: None — clean merge.
+
+          ### Review checklist
+          - [ ] Scan the diff for changes that touch files we've customized
+          - [ ] Verify CI passes
+          - [ ] Check if any upstream changes obsolete our patches
+          EOF
+          )"
+
+      - name: Create pull request (conflicts)
+        if: steps.check.outputs.behind != '0' && steps.existing_pr.outputs.exists == 'false' && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_SHA: ${{ needs.sync-main.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
+        run: |
+          gh pr create \
+            --base "$COHERE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync upstream ($UPSTREAM_SHA) — needs conflict resolution" \
+            --body "$(cat <<EOF
+          ## Upstream sync — manual merge needed
+
+          Upstream has new commits to merge into \`${COHERE_BRANCH}\`, but there are conflicts.
+
+          **Upstream HEAD**: \`${UPSTREAM_SHA}\`
+
+          ### How to resolve
+
+          The sync branch already contains the upstream commits (it points at
+          \`origin/main\`). To make it mergeable into \`${COHERE_BRANCH}\`,
+          merge cohere into the sync branch and resolve conflicts there:
+
+          \`\`\`bash
+          git fetch origin
+          git checkout ${SYNC_BRANCH}
+          git merge origin/${COHERE_BRANCH}
+          # Git will show conflicts — resolve them in your IDE, then:
+          git add -A && git commit
+          git push origin ${SYNC_BRANCH}
+          \`\`\`
+
+          Your IDE will show the native merge conflict UI with accept-theirs /
+          accept-ours / accept-both options for each conflict. Once the push
+          succeeds, the PR will become mergeable.
+
+          ### Review checklist
+          - [ ] Resolve all conflicts
+          - [ ] Verify CI passes
+          - [ ] Check if any upstream changes obsolete our patches
+          EOF
+          )"
