@@ -153,17 +153,20 @@ jobs:
         if: steps.check.outputs.behind != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SYNC_BRANCH: ${{ steps.check.outputs.sync_branch }}
         run: |
-          # Idempotency guard. The sync branch name is deterministic
-          # (date + main SHA), so re-running on an unchanged main computes the
-          # same name. If an open PR for it already exists, a previous run
-          # already did the work — re-creating it would fail with "a pull
-          # request already exists" or a non-fast-forward push. Skip in that case.
-          COUNT=$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq 'length')
+          # Idempotency guard. Any open PR into $COHERE_BRANCH whose head branch
+          # starts with `sync/upstream-` means a previous run already produced a
+          # sync that's still awaiting review. We match by head prefix + base
+          # rather than the exact branch name: the name embeds today's date, so
+          # an exact match would miss a still-open PR from an earlier day and
+          # create a duplicate. Re-creating would also fail with "a pull request
+          # already exists" or a non-fast-forward push. Skip in that case.
+          COUNT=$(gh pr list --state open --base "$COHERE_BRANCH" \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("sync/upstream-"))] | length')
           if [ "$COUNT" -gt 0 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "An open sync PR for $SYNC_BRANCH already exists — skipping push + PR creation."
+            echo "An open upstream-sync PR into $COHERE_BRANCH already exists — skipping push + PR creation."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
