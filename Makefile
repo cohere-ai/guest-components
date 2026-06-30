@@ -57,6 +57,10 @@ else ifeq ($(TEE_PLATFORM), cca)
   ATTESTER = cca-attester
 else ifeq ($(TEE_PLATFORM), tdx-nvidia)
   ATTESTER = tdx-attester,nvidia-attester
+else ifeq ($(TEE_PLATFORM), cc-nvidia)
+  # Universal variant (GCP-TDX, GCP-SNP, Azure-SNP); AA picks the attester at
+  # runtime. Links libnvat.so, so must build with gnu libc.
+  ATTESTER = tdx-attester,snp-attester,az-snp-vtpm-attester,nvidia-attester
 endif
 # TODO: Add support for CSV
 
