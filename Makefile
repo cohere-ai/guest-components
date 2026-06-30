@@ -55,8 +55,8 @@ else ifeq ($(TEE_PLATFORM), amd)
   endif
 else ifeq ($(TEE_PLATFORM), cca)
   ATTESTER = cca-attester
-else ifeq ($(TEE_PLATFORM), tdx-nvidia)
-  ATTESTER = tdx-attester,nvidia-attester
+else ifeq ($(TEE_PLATFORM), tdx-snp-nvidia)
+  ATTESTER = tdx-attester,snp-attester,az-snp-vtpm-attester,nvidia-attester
 endif
 # TODO: Add support for CSV
 
