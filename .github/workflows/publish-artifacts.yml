@@ -24,10 +24,10 @@ jobs:
           { tee: amd,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
           { tee: az-cvm-vtpm, arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
           { tee: tdx,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          # Cohere fork: AA with combined TDX + NVIDIA GPU attesters. libnvat.so
-          # is a C++ shared library (NVIDIA attestation-sdk-cpp) so this variant
-          # must use gnu libc, and the resulting tarball bundles libnvat.so*.
-          { tee: tdx-nvidia,  arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
+          # Cohere fork: AA with TDX + SNP + Azure SNP-vTPM + NVIDIA GPU
+          # attesters. It links libtss2 + libnvat, so this variant must use gnu
+          # libc, and the resulting tarball bundles libnvat.so*.
+          { tee: tdx-snp-nvidia,  arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
         ]
     runs-on: ${{ matrix.platform.runner }}
     env:
@@ -64,12 +64,13 @@ jobs:
         sudo apt-get update
 
     - name: Install tpm dependencies
-      if: matrix.platform.tee == 'az-cvm-vtpm'
+      # az-snp-vtpm-attester links against TSS2.
+      if: matrix.platform.tee == 'az-cvm-vtpm' || matrix.platform.tee == 'tdx-snp-nvidia'
       run: |
         sudo apt-get install -y --no-install-recommends libtss2-dev
 
     - name: Build and install NVIDIA attestation-sdk (libnvat)
-      if: matrix.platform.tee == 'tdx-nvidia'
+      if: matrix.platform.tee == 'tdx-snp-nvidia'
       env:
         # Pinned to the commit currently tagged 2026.03.02 so the build
         # cannot be affected by a force-pushed/retagged upstream release.
@@ -104,7 +105,7 @@ jobs:
       env:
         ARCH: ${{ matrix.platform.arch }}
         LIBC: ${{ matrix.platform.libc }}
-        NVAT_USE_SYSTEM_LIB: ${{ matrix.platform.tee == 'tdx-nvidia' && '1' || '' }}
+        NVAT_USE_SYSTEM_LIB: ${{ matrix.platform.tee == 'tdx-snp-nvidia' && '1' || '' }}
       run: |
         make ./target/${{ env.RUST_TARGET }}/release/attestation-agent
 
@@ -116,10 +117,10 @@ jobs:
         mkdir oras
         cd oras
         cp ../target/${{ env.RUST_TARGET }}/release/attestation-agent .
-        # For the tdx-nvidia variant, AA dynamically links against libnvat.so
+        # For the tdx-snp-nvidia variant, AA dynamically links against libnvat.so
         # (NVIDIA attestation-sdk-cpp). Bundle the shared library + its
         # symlinks into lib/ so consumers can install it alongside the binary.
-        if [ "${{ matrix.platform.tee }}" = "tdx-nvidia" ]; then
+        if [ "${{ matrix.platform.tee }}" = "tdx-snp-nvidia" ]; then
           mkdir -p lib
           # cmake installs libnvat with CMAKE_INSTALL_PREFIX=/usr, so the
           # library lands in /usr/lib on Ubuntu (no /usr/lib64 on multiarch).
