@@ -19,7 +19,10 @@ pub const AA_ROOT: &str = "/aa";
 /// URL for querying CDH get resource API
 pub const AA_TOKEN_URL: &str = "/token";
 pub const AA_EVIDENCE_URL: &str = "/evidence";
-pub const AA_ADDITIONAL_EVIDENCE_URL: &str = "/additional_evidence";
+pub const AA_ADDITIONAL_EVIDENCE_URL: &str = "/additional-evidence";
+/// Cohere fork: legacy spelling served before upstream added the endpoint.
+/// TNG <= v0.7.0 calls this path. Remove once no deployed TNG uses it.
+pub const AA_ADDITIONAL_EVIDENCE_LEGACY_URL: &str = "/additional_evidence";
 pub const AA_AAEL_URL: &str = "/aael";
 
 pub struct AAClient {

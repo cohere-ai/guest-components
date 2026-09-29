@@ -7,38 +7,80 @@ on:
 permissions:
   contents: read
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/confidential-containers/staged-images/coco-keyprovider
+
 jobs:
   build-and-push-images:
     permissions:
       packages: write
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{github.actor}}
           password: ${{secrets.GITHUB_TOKEN}}
 
-      - name: Build and push coco-key-provider
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+      # Build natively on each architecture's runner rather than relying on
+      # QEMU emulation, which makes the arm64 cargo build prohibitively slow.
+      - name: Build and push coco-key-provider (${{ matrix.platform.arch }})
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./attestation-agent/docker/Dockerfile.keyprovider
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.platform.arch }}
           push: true
-          tags: ghcr.io/confidential-containers/staged-images/coco-keyprovider:${{ github.sha }}, ghcr.io/confidential-containers/staged-images/coco-keyprovider:latest
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.platform.arch }}
+
+  merge-manifests:
+    needs: build-and-push-images
+    permissions:
+      packages: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{github.actor}}
+          password: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          for tag in "${{ github.sha }}" latest; do
+            docker buildx imagetools create --tag "${IMAGE}:${tag}" \
+              "${IMAGE}:${{ github.sha }}-amd64" \
+              "${IMAGE}:${{ github.sha }}-arm64"
+          done

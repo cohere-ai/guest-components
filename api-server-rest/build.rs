@@ -32,7 +32,7 @@ fn _token() {}
     path = "/aa/evidence",
     params(
         ("runtime_data" = String, Query, description = "Runtime Data"),
-        ("encoding" = Option<String>, Query, description = "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string")
+        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe base64 (no padding)")
     ),
     responses(
         (status = 200, description = "success response",
@@ -49,16 +49,16 @@ fn _evidence() {}
 
 #[utoipa::path(
     get,
-    path = "/aa/additional_evidence",
+    path = "/aa/additional-evidence",
     params(
         ("runtime_data" = String, Query, description = "Runtime Data"),
-        ("encoding" = Option<String>, Query, description = "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string")
+        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe base64 (no padding)")
     ),
     responses(
         (status = 200, description = "success response",
                 content_type = "application/octet-stream",
                 body = String,
-                example = json!({"svn":"1","report_data":"eHh4eA=="})),
+                example = json!({"sev-snp":"..."})),
         (status = 400, description = "bad request for invalid query param"),
         (status = 403, description = "forbid external access"),
         (status = 404, description = "resource not found"),

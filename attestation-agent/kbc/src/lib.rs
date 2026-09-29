@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use anyhow::*;
 use async_trait::async_trait;
+use resource_uri::ResourceUri;
 use serde::{Deserialize, Serialize};
 
 pub use self::annotation_packet::AnnotationPacket;
-use resource_uri::ResourceUri;
 
 // Add your specific kbc declaration here.
 // For example: "pub mod sample_kbc;"
@@ -45,7 +45,7 @@ pub trait KbcInterface: Send {
     async fn decrypt_payload(&mut self, annotation_packet: AnnotationPacket) -> Result<Vec<u8>>;
 
     /// Get resources managed by the attestation agent in asynchronous mode.
-    async fn get_resource(&mut self, _rid: ResourceUri) -> Result<Vec<u8>> {
+    async fn get_resource(&mut self, _resource_uri: ResourceUri) -> Result<Vec<u8>> {
         bail!("Get Resource API of this KBC is unimplement!")
     }
 }
@@ -148,7 +148,7 @@ pub mod tests {
         Policy,
 
         /// used to configure the storage path of public keys used
-        /// by simple signing when doing iamge signature verification
+        /// by simple signing when doing image signature verification
         #[strum(serialize = "kbs:///default/sigstore-config/test")]
         SigstoreConfig,
 
