@@ -23,6 +23,7 @@ protos = { path = "../protos", default-features = false, features = ["ttrpc"] }
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 serde_json = { workspace = true }
