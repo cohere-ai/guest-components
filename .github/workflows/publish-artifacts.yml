@@ -4,6 +4,9 @@ on:
   push:
     branches:
     - main
+    # Cohere version branches: cohere-v<upstream release>.
+    - 'cohere-v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +31,10 @@ jobs:
           { tee: cca,         arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
           { tee: se,          arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
           { tee: none,        arch: powerpc64le,  libc: gnu, runner: ubuntu-24.04-ppc64le },
+          # Cohere fork: AA with TDX + SNP + Azure SNP-vTPM + NVIDIA GPU
+          # attesters. It links libtss2 + libnvat, so this variant must use gnu
+          # libc, and the resulting tarball bundles libnvat.so*.
+          { tee: tdx-snp-nvidia,  arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
         ]
     runs-on: ${{ matrix.platform.runner }}
     env:
@@ -68,18 +75,48 @@ jobs:
         sudo apt-get update
 
     - name: Install tpm dependencies
-      if: matrix.platform.tee == 'az-cvm-vtpm'
+      # az-snp-vtpm-attester links against TSS2.
+      if: matrix.platform.tee == 'az-cvm-vtpm' || matrix.platform.tee == 'tdx-snp-nvidia'
       run: |
         sudo apt-get install -y --no-install-recommends libtss2-dev
 
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      with:
-        persist-credentials: false
+    - name: Build and install NVIDIA attestation-sdk (libnvat)
+      if: matrix.platform.tee == 'tdx-snp-nvidia'
+      env:
+        # Pinned to the commit currently tagged 2026.03.02 so the build
+        # cannot be affected by a force-pushed/retagged upstream release.
+        NV_ATTESTATION_SDK_REF: "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3"
+        # setup-rust-toolchain sets RUSTFLAGS=-D warnings, which turns new
+        # rustc lints into hard errors when cmake's ExternalProject builds
+        # the bundled regorus crate (e.g. mismatched_lifetime_syntaxes on
+        # rustc 1.83+). Clear it so the third-party crate compiles with its
+        # own lint policy.
+        RUSTFLAGS: ""
+      run: |
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake protobuf-compiler pkg-config clang libssl-dev
+        git clone https://github.com/NVIDIA/attestation-sdk /tmp/nv-attestation-sdk
+        git -C /tmp/nv-attestation-sdk checkout "${NV_ATTESTATION_SDK_REF}"
+        BUILD_DIR=/tmp/nv-attestation-sdk/nv-attestation-sdk-cpp/build
+        cmake -S /tmp/nv-attestation-sdk/nv-attestation-sdk-cpp -B "$BUILD_DIR" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_TESTING=OFF
+        # Build as runner so cargo's bundled regorus build does not produce
+        # root-owned artifacts that the cleanup `rm -rf` can no longer remove
+        # (and don't pollute /tmp ownership for downstream steps). Only the
+        # install step needs sudo, since it writes to /usr.
+        cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+        sudo cmake --install "$BUILD_DIR"
+        sudo ldconfig
+        rm -rf /tmp/nv-attestation-sdk
 
     - name: Build AA
       env:
         ARCH: ${{ matrix.platform.arch }}
         LIBC: ${{ matrix.platform.libc }}
+        NVAT_USE_SYSTEM_LIB: ${{ matrix.platform.tee == 'tdx-snp-nvidia' && '1' || '' }}
       run: |
         make ./target/$RUST_TARGET/release/attestation-agent
 
@@ -91,7 +128,23 @@ jobs:
         mkdir oras
         cd oras
         cp ../target/$RUST_TARGET/release/attestation-agent .
-        tar cJf attestation-agent.tar.xz attestation-agent
+        # For the tdx-snp-nvidia variant, AA dynamically links against libnvat.so
+        # (NVIDIA attestation-sdk-cpp). Bundle the shared library + its
+        # symlinks into lib/ so consumers can install it alongside the binary.
+        if [ "${{ matrix.platform.tee }}" = "tdx-snp-nvidia" ]; then
+          mkdir -p lib
+          # cmake installs libnvat with CMAKE_INSTALL_PREFIX=/usr, so the
+          # library lands in /usr/lib on Ubuntu (no /usr/lib64 on multiarch).
+          find /usr/lib -maxdepth 3 -name 'libnvat.so*' \
+            -exec cp -a {} lib/ \;
+          if ! compgen -G "lib/libnvat.so*" >/dev/null; then
+            echo "ERROR: libnvat.so not found after attestation-sdk install" >&2
+            exit 1
+          fi
+          tar cJf attestation-agent.tar.xz attestation-agent lib
+        else
+          tar cJf attestation-agent.tar.xz attestation-agent
+        fi
         arch="${{ matrix.platform.arch }}"
         # After building for target powerpc64le, tag and push the image as ppc64le to match standard arch naming.
         [ "$arch" = "powerpc64le" ] && arch="ppc64le"
