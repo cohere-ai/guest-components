@@ -4,18 +4,27 @@
 //
 
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 
 /// Parse `runtime_data` from the evidence query string.
 ///
 /// When `encoding` is `base64`, `runtime_data` is decoded as URL-safe base64 (no padding).
 /// Otherwise the raw UTF-8 bytes of the query value are used (legacy behavior).
+///
+/// Cohere carry: `base64` also accepts standard (padded) base64, which released TNG
+/// (<= 0.7.0) sends.
+/// The two base64 alphabets differ only in `+`/`/` versus `-`/`_`, so any input valid under
+/// both decodes to the same bytes.
 pub fn decode_runtime_data(runtime_data: &str, encoding: Option<&str>) -> Result<Vec<u8>> {
     match encoding {
         None => Ok(runtime_data.as_bytes().to_vec()),
         Some("base64") => URL_SAFE_NO_PAD
             .decode(runtime_data)
-            .context("invalid base64 URL-safe runtime_data"),
+            .or_else(|_| STANDARD.decode(runtime_data))
+            .context("invalid base64 runtime_data"),
         Some(other) => Err(anyhow!("unsupported runtime_data encoding: {other}")),
     }
 }
@@ -41,6 +50,11 @@ mod tests {
     #[case("cmVwb3J0", Some("base64"), true, Some(b"report".as_slice()))]
     #[case("data", Some("hex"), false, None)]
     #[case("!!!", Some("base64"), false, None)]
+    // Cohere carry: standard (padded) base64, with and without `+`/`/`.
+    #[case("aGk=", Some("base64"), true, Some(b"hi".as_slice()))]
+    #[case("+/8=", Some("base64"), true, Some([0xfb, 0xff].as_slice()))]
+    // URL-safe no-pad form of the same bytes still decodes.
+    #[case("-_8", Some("base64"), true, Some([0xfb, 0xff].as_slice()))]
     fn test_decode_runtime_data(
         #[case] runtime_data: &str,
         #[case] encoding: Option<&str>,

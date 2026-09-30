@@ -20,6 +20,9 @@ pub const AA_ROOT: &str = "/aa";
 pub const AA_TOKEN_URL: &str = "/token";
 pub const AA_EVIDENCE_URL: &str = "/evidence";
 pub const AA_ADDITIONAL_EVIDENCE_URL: &str = "/additional-evidence";
+/// Cohere carry: legacy path served by the Cohere fork before upstream added
+/// `/additional-evidence`. Released TNG (<= 0.7.0) still calls it.
+pub const AA_ADDITIONAL_EVIDENCE_LEGACY_URL: &str = "/additional_evidence";
 pub const AA_AAEL_URL: &str = "/aael";
 
 pub struct AAClient {
