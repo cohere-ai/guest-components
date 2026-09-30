@@ -49,6 +49,60 @@
         }
       }
     },
+    "/aa/additional_evidence": {
+      "get": {
+        "tags": [],
+        "operationId": "_additional_evidence",
+        "parameters": [
+          {
+            "name": "runtime_data",
+            "in": "query",
+            "description": "Runtime Data",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "encoding",
+            "in": "query",
+            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "success response",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": {
+                  "report_data": "eHh4eA==",
+                  "svn": "1"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad request for invalid query param"
+          },
+          "403": {
+            "description": "forbid external access"
+          },
+          "404": {
+            "description": "resource not found"
+          },
+          "405": {
+            "description": "only Get method allowed"
+          }
+        }
+      }
+    },
     "/aa/evidence": {
       "get": {
         "tags": [],
@@ -59,6 +113,15 @@
             "in": "query",
             "description": "Runtime Data",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "encoding",
+            "in": "query",
+            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "required": false,
             "schema": {
               "type": "string"
             }
