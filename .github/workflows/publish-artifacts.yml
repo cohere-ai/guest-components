@@ -27,15 +27,9 @@ jobs:
       matrix:
         platform: [
           { tee: none,        arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: none,        arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
-          { tee: none,        arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
           { tee: amd,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
           { tee: az-cvm-vtpm, arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
           { tee: tdx,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: cca,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: cca,         arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
-          { tee: se,          arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
-          { tee: none,        arch: powerpc64le,  libc: gnu, runner: ubuntu-24.04-ppc64le },
           # Cohere fork: AA with TDX + SNP + Azure SNP-vTPM + NVIDIA GPU
           # attesters. It links libtss2 + libnvat, so this variant must use gnu
           # libc. The tarball bundles libnvat and its non-glibc dependencies;
@@ -187,22 +181,10 @@ jobs:
       matrix:
         arch:
         - x86_64
-        - s390x
-        - aarch64
-        - powerpc64le
         include:
         - arch: x86_64
           libc: musl
           instance: ubuntu-24.04
-        - arch: s390x
-          libc: gnu
-          instance: ubuntu-24.04-s390x
-        - arch: aarch64
-          libc: gnu
-          instance: ubuntu-24.04-arm
-        - arch: powerpc64le
-          libc: gnu
-          instance: ubuntu-24.04-ppc64le
     runs-on: ${{ matrix.instance }}
     env:
       LIBC: ${{ matrix.libc }}
