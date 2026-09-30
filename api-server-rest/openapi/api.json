@@ -49,7 +49,7 @@
         }
       }
     },
-    "/aa/additional_evidence": {
+    "/aa/additional-evidence": {
       "get": {
         "tags": [],
         "operationId": "_additional_evidence",
@@ -66,7 +66,7 @@
           {
             "name": "encoding",
             "in": "query",
-            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "description": "Runtime data encoding; use `base64` for URL-safe base64 (no padding)",
             "required": false,
             "schema": {
               "type": "string"
@@ -82,8 +82,7 @@
                   "type": "string"
                 },
                 "example": {
-                  "report_data": "eHh4eA==",
-                  "svn": "1"
+                  "sev-snp": "..."
                 }
               }
             }
@@ -120,7 +119,7 @@
           {
             "name": "encoding",
             "in": "query",
-            "description": "Encoding of runtime_data: 'hex', 'base64', or omit for raw UTF-8 string",
+            "description": "Runtime data encoding; use `base64` for URL-safe base64 (no padding)",
             "required": false,
             "schema": {
               "type": "string"

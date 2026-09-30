@@ -38,24 +38,28 @@ jobs:
       RUST_TARGET: ${{ matrix.platform.arch }}-unknown-linux-${{ matrix.platform.libc }}
     steps:
     - name: Harden the runner (Audit all outbound calls)
-      uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+      uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
       with:
         egress-policy: audit
 
     - name: Log in to the Container registry
-      uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+    - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
       with:
         version: 1.2.0
 
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        fetch-tags: true
 
-    - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+    - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       with:
         target: ${{ env.RUST_TARGET }}
 
@@ -107,7 +111,7 @@ jobs:
         LIBC: ${{ matrix.platform.libc }}
         NVAT_USE_SYSTEM_LIB: ${{ matrix.platform.tee == 'tdx-snp-nvidia' && '1' || '' }}
       run: |
-        make ./target/${{ env.RUST_TARGET }}/release/attestation-agent
+        make ./target/$RUST_TARGET/release/attestation-agent
 
     - name: Publish with ORAS
       id: publish
@@ -116,7 +120,7 @@ jobs:
       run: |
         mkdir oras
         cd oras
-        cp ../target/${{ env.RUST_TARGET }}/release/attestation-agent .
+        cp ../target/$RUST_TARGET/release/attestation-agent .
         # For the tdx-snp-nvidia variant, AA dynamically links against libnvat.so
         # (NVIDIA attestation-sdk-cpp). Bundle the shared library + its
         # symlinks into lib/ so consumers can install it alongside the binary.
@@ -151,7 +155,7 @@ jobs:
         digest="$(oras manifest fetch "${image}:${arch_tag}" --descriptor | jq -r .digest)"
         echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-    - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+    - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
       with:
         subject-name: ${{ steps.publish.outputs.image }}
         subject-digest: ${{ steps.publish.outputs.digest }}
@@ -179,24 +183,26 @@ jobs:
       RUST_TARGET: ${{ matrix.arch }}-unknown-linux-${{ matrix.libc }}
     steps:
     - name: Harden the runner (Audit all outbound calls)
-      uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+      uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
       with:
         egress-policy: audit
 
     - name: Log in to the Container registry
-      uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+    - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
       with:
         version: 1.2.0
 
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
 
-    - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+    - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       with:
         target: ${{ env.RUST_TARGET }}
 
@@ -213,13 +219,13 @@ jobs:
       env:
         ARCH: ${{ matrix.arch }}
         LIBC: ${{ matrix.libc }}
-      run: make ./target/${{ env.RUST_TARGET }}/release/confidential-data-hub
+      run: make ./target/$RUST_TARGET/release/confidential-data-hub
 
     - name: Build ASR
       env:
         ARCH: ${{ matrix.arch }}
         LIBC: ${{ matrix.libc }}
-      run: make ./target/${{ env.RUST_TARGET }}/release/api-server-rest
+      run: make ./target/$RUST_TARGET/release/api-server-rest
 
     - name: Publish CDH + ASR with ORAS
       id: publish
@@ -230,29 +236,29 @@ jobs:
         tag="${{ github.sha }}-${arch}"
         mkdir oras
         cd oras
-        cp ../target/${{ env.RUST_TARGET }}/release/{confidential-data-hub,api-server-rest} .
+        cp ../target/$RUST_TARGET/release/{confidential-data-hub,api-server-rest} .
 
         tar cJf confidential-data-hub.tar.xz confidential-data-hub
-        image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/confidential-data-hub"
+        image="${{ env.REGISTRY }}/$IMAGE_NAME/confidential-data-hub"
         oras push "${image}:${tag}" confidential-data-hub.tar.xz
         echo "cdh-image=${image}" >> "$GITHUB_OUTPUT"
         digest="$(oras manifest fetch "${image}:${tag}" --descriptor | jq -r .digest)"
         echo "cdh-digest=${digest}" >> "$GITHUB_OUTPUT"
 
         tar cJf api-server-rest.tar.xz api-server-rest
-        image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-server-rest"
+        image="${{ env.REGISTRY }}/$IMAGE_NAME/api-server-rest"
         oras push "${image}:${tag}" api-server-rest.tar.xz
         echo "asr-image=${image}" >> "$GITHUB_OUTPUT"
         digest="$(oras manifest fetch "${image}:${tag}" --descriptor | jq -r .digest)"
         echo "asr-digest=${digest}" >> "$GITHUB_OUTPUT"
 
-    - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+    - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
       with:
         subject-name: ${{ steps.publish.outputs.cdh-image }}
         subject-digest: ${{ steps.publish.outputs.cdh-digest }}
         push-to-registry: true
 
-    - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+    - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
       with:
         subject-name: ${{ steps.publish.outputs.asr-image }}
         subject-digest: ${{ steps.publish.outputs.asr-digest }}
