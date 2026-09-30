@@ -67,12 +67,13 @@ jobs:
           attester: cca-attester
           measured_rootfs: "yes"
           runner: ubuntu-24.04-arm
-        - arch: s390x
-          oci_arch: s390x
-          libc: gnu
-          attester: se-attester
-          measured_rootfs: "no"
-          runner: s390x
+        # Cohere fork: no s390x runner; keep the entry for reference (see f475b74f).
+        # - arch: s390x
+        #   oci_arch: s390x
+        #   libc: gnu
+        #   attester: se-attester
+        #   measured_rootfs: "no"
+        #   runner: s390x
     runs-on: ${{ matrix.runner }}
     env:
       ARCH: ${{ matrix.arch }}
