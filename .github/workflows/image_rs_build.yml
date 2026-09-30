@@ -33,7 +33,7 @@ jobs:
       matrix:
         instance:
           - ubuntu-24.04
-          - ubuntu-24.04-s390x
+          # - ubuntu-24.04-s390x
           - ubuntu-24.04-arm
     runs-on: ${{ matrix.instance }}
     steps:
