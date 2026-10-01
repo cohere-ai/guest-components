@@ -1,0 +1,163 @@
+name: Sync upstream
+
+# Cohere maintains guest-components as patched version branches: each
+# cohere-v<X.Y.Z> branch is an upstream release tag plus the Cohere patches.
+# This workflow keeps the fork's main and release tags in sync with upstream
+# and reports when upstream has a release that has no version branch yet.
+# It never merges upstream into a Cohere branch; upgrades are done by
+# rebasing the patches onto the new tag (see COHERE.md).
+
+on:
+  schedule:
+    # Every Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to sync main from (default: main)"
+        required: false
+        default: "main"
+
+# Deny all permissions at the workflow level; jobs opt in explicitly below.
+permissions: {}
+
+# Only one sync workflow runs at a time, so a manual dispatch overlapping the
+# cron schedule cannot race the push to main.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/confidential-containers/guest-components.git
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+
+jobs:
+  # ── Step 1: fast-forward origin/main and mirror release tags ─────────────
+  sync-main:
+    name: Fast-forward main and mirror release tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the fast-forwarded main branch and release tags
+    outputs:
+      new_commits: ${{ steps.ff.outputs.new_commits }}
+      upstream_sha: ${{ steps.ff.outputs.upstream_sha }}
+    steps:
+      # The default GITHUB_TOKEN cannot push to .github/workflows/ files, and
+      # main is protected by branch protection. We mint a short-lived token from
+      # the guest-components-upstream-sync GitHub App, which has Workflows:
+      # write and is a bypass actor on the main branch protection.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: Checkout main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          # zizmor: token is set up explicitly below via `gh auth setup-git`
+          # so it isn't persisted in .git/config after this step.
+          persist-credentials: false
+
+      - name: Configure git
+        # The App token is set per-step (it's a step output, so it can't live
+        # at job level). `gh auth setup-git` registers gh as a git credential
+        # helper, which reads $GH_TOKEN at push-time.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+      - name: Fast-forward main to upstream
+        id: ff
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git remote add upstream "$UPSTREAM_REPO" || true
+          git fetch upstream "$UPSTREAM_REF"
+
+          BEHIND=$(git rev-list --count "HEAD..upstream/$UPSTREAM_REF")
+          UPSTREAM_SHA=$(git rev-parse --short "upstream/$UPSTREAM_REF")
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "main is already up to date with upstream."
+            echo "new_commits=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          AHEAD=$(git rev-list --count "upstream/$UPSTREAM_REF..HEAD")
+          if [ "$AHEAD" -ne 0 ]; then
+            echo "::error::origin/main is $AHEAD commits AHEAD of upstream — cannot fast-forward."
+            echo "::error::Remove the extra commits first (rebase or reset) before syncing."
+            exit 1
+          fi
+
+          git merge --ff-only "upstream/$UPSTREAM_REF"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          echo "new_commits=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Fast-forwarded main by $BEHIND commits to $UPSTREAM_SHA"
+
+      # Version branches are created from upstream release tags, so the fork
+      # needs them. Only plain vX.Y.Z tags are mirrored; Cohere's own
+      # vX.Y.Z-cohere.N tags are never touched.
+      - name: Mirror upstream release tags
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git fetch upstream 'refs/tags/v*:refs/tags/v*'
+          git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | while read -r tag; do
+                if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+                  echo "Mirroring $tag"
+                  git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+                fi
+              done
+
+  # ── Step 2: report upstream releases with no version branch ──────────────
+  report-releases:
+    name: Report new upstream releases
+    needs: sync-main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # open a tracking issue for a new upstream release
+    steps:
+      - name: Find the newest release and its version branch
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh api "repos/confidential-containers/guest-components/releases/latest" --jq .tag_name)
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          if gh api "repos/${GITHUB_REPOSITORY}/branches/cohere-${LATEST}" >/dev/null 2>&1; then
+            echo "cohere-${LATEST} exists; nothing to report."
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No cohere-${LATEST} branch yet."
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a tracking issue
+        if: steps.check.outputs.missing == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          TITLE="Upstream guest-components ${LATEST} has no cohere-${LATEST} branch"
+          if [ -n "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')" ]; then
+            echo "Tracking issue already open."
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "Upstream released ${LATEST}. Cohere version branches are only cut for releases the CAA pins need; close this if ${LATEST} is not needed.
+
+          To add it:
+          1. Create \`cohere-${LATEST}\` from the \`${LATEST}\` tag (members of the confidential-computing team).
+          2. Rebase the patches from the current version branch: \`git rebase --onto ${LATEST} <old-tag> <old-branch>\`.
+          3. Open a PR into \`cohere-${LATEST}\` with the \`git range-diff\`, then fast-forward the branch after approval."
