@@ -7,7 +7,7 @@ releases.
 ## Branches and tags
 
 - `main`: mirror of upstream `main`. Never contains Cohere changes. Nothing
-  syncs it automatically; update it by hand when needed:
+  syncs it automatically; repository admins update it by hand when needed:
 
   ```bash
   git fetch https://github.com/confidential-containers/guest-components.git main
@@ -31,10 +31,10 @@ cloud-api-adaptor pins guest-components by that SHA in `versions.yaml`.
 
 `publish-artifacts` can also be run manually (`workflow_dispatch`) from any
 branch, for example to test an upgrade branch from cloud-api-adaptor before it
-merges. Those artifacts land in the same GHCR repositories. cloud-api-adaptor's
-`hack/verify-provenance.sh` only accepts artifacts built from `main`, `cohere`
-or `cohere-v<X.Y.Z>`, so a PodVM build rejects them unless it explicitly allows
-that one branch with `PROVENANCE_EXTRA_REF` (dev builds only).
+merges. Those artifacts land in the same GHCR repositories. For this repository,
+cloud-api-adaptor's `hack/verify-provenance.sh` only accepts artifacts built from
+`cohere` or `cohere-v<X.Y.Z>`, so a PodVM build rejects them unless it explicitly
+allows that one branch with `PROVENANCE_EXTRA_REF` (dev builds only).
 
 ## Protection
 
