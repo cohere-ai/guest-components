@@ -65,6 +65,8 @@ rstest.workspace = true
 # When bumping this tag, check the crate's release notes on GitHub for its
 # corresponding libnvat/libnvat-dev version, and update the `version` input
 # default in .github/actions/install-nvat-sdk/action.yml to match.
+# Cohere: also update that action's `libnvat-sha256` and `libnvat-dev-sha256`
+# defaults to the new packages' SHA-256 digests.
 nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", tag = "2026.06.09", optional = true }
 
 [[bin]]

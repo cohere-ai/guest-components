@@ -1,19 +1,23 @@
 name: Install NVIDIA Attestation SDK
-description: Install the NVIDIA Attestation SDK (libnvat-dev) from NVIDIA's apt repository (x86_64 only)
+description: Install verified NVIDIA Attestation SDK packages (x86_64 only)
 
 inputs:
   version:
     description: >
-      libnvat-dev version to install. Should match the NVAT release used by
+      Exact libnvat and libnvat-dev package version to install. Should match the NVAT release used by
       the "nv-attestation-sdk" crate dependency in
       attestation-agent/attester/Cargo.toml (see that crate's GitHub release
       notes for its corresponding libnvat/libnvat-dev version).
     required: false
-    default: "1.2.2"
-  cuda-keyring-version:
-    description: cuda-keyring package version used to register NVIDIA's apt repository
+    default: "1.2.2.1780962352-1"
+  libnvat-sha256:
+    description: SHA-256 digest of the libnvat package
     required: false
-    default: "1.1-1"
+    default: "ad3b3f0619a997ee81e61249c7add881df84d8427bb7f49d2db86660f24f5b11"
+  libnvat-dev-sha256:
+    description: SHA-256 digest of the libnvat-dev package
+    required: false
+    default: "500fafd99ddd333f123a16ad78b070a96061a321aa880cf437efb7375e36641b"
 
 runs:
   using: composite
@@ -23,15 +27,27 @@ runs:
       shell: bash
       env:
         NVAT_VERSION: ${{ inputs.version }}
-        CUDA_KEYRING_VERSION: ${{ inputs.cuda-keyring-version }}
+        LIBNVAT_SHA256: ${{ inputs.libnvat-sha256 }}
+        LIBNVAT_DEV_SHA256: ${{ inputs.libnvat-dev-sha256 }}
       run: |
         tmpdir="$(mktemp -d)"
-        curl -fsSL -o "${tmpdir}/cuda-keyring.deb" \
-          "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}_all.deb"
-        sudo dpkg -i "${tmpdir}/cuda-keyring.deb"
-        rm -rf "${tmpdir}"
+        trap 'rm -rf "${tmpdir}"' EXIT
+        repository="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64"
+
+        curl -fsSL -o "${tmpdir}/libnvat.deb" \
+          "${repository}/libnvat_${NVAT_VERSION}_amd64.deb"
+        curl -fsSL -o "${tmpdir}/libnvat-dev.deb" \
+          "${repository}/libnvat-dev_${NVAT_VERSION}_amd64.deb"
+
+        printf '%s  %s\n' \
+          "${LIBNVAT_SHA256}" "${tmpdir}/libnvat.deb" \
+          "${LIBNVAT_DEV_SHA256}" "${tmpdir}/libnvat-dev.deb" \
+          | sha256sum --check --strict
 
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends "libnvat-dev=${NVAT_VERSION}*"
+        sudo apt-get install -y --no-install-recommends \
+          "${tmpdir}/libnvat.deb" \
+          "${tmpdir}/libnvat-dev.deb"
+        sudo ldconfig
 
         echo "NVAT_USE_SYSTEM_LIB=1" >> "$GITHUB_ENV"
