@@ -14,12 +14,19 @@ use tracing::{debug, error, info};
 use crate::VERSION;
 use crate::client::{
     aa::{
-        AA_AAEL_URL, AA_ADDITIONAL_EVIDENCE_URL, AA_EVIDENCE_URL, AA_ROOT, AA_TOKEN_URL, AAClient,
-        AaelEvent,
+        AA_AAEL_URL, AA_ADDITIONAL_EVIDENCE_LEGACY_URL, AA_ADDITIONAL_EVIDENCE_URL,
+        AA_EVIDENCE_URL, AA_ROOT, AA_TOKEN_URL, AAClient, AaelEvent,
     },
     cdh::{CDH_RESOURCE_URL, CDH_ROOT, CDHClient},
 };
 use crate::utils::{decode_runtime_data, split_nth_slash};
+
+fn is_additional_evidence_path(path: &str) -> bool {
+    matches!(
+        path,
+        AA_ADDITIONAL_EVIDENCE_URL | AA_ADDITIONAL_EVIDENCE_LEGACY_URL
+    )
+}
 
 pub struct Router {
     aa_client: Option<AAClient>,
@@ -194,7 +201,7 @@ impl Router {
                                 None => return self.bad_request(),
                             }
                         }
-                        (AA_ADDITIONAL_EVIDENCE_URL, &Method::GET) => {
+                        (url_path, &Method::GET) if is_additional_evidence_path(url_path) => {
                             info!("Get additional evidence");
                             match params.get("runtime_data") {
                                 Some(runtime_data) => {
@@ -471,6 +478,14 @@ mod tests {
     }
 
     #[rstest]
+    #[case(AA_ADDITIONAL_EVIDENCE_URL, true)]
+    #[case(AA_ADDITIONAL_EVIDENCE_LEGACY_URL, true)]
+    #[case("/unknown", false)]
+    fn additional_evidence_path_matching(#[case] path: &str, #[case] expected: bool) {
+        assert_eq!(is_additional_evidence_path(path), expected);
+    }
+
+    #[rstest]
     #[case(Method::GET, "/aa/token?token_type=kbs")]
     #[case(Method::GET, "/aa/evidence?runtime_data=aGVsbG8")]
     #[case(Method::GET, "/aa/additional-evidence?runtime_data=aGVsbG8")]
@@ -488,6 +503,62 @@ mod tests {
         let resp = router.route(loopback(), req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_str(resp).await, "Attestation Feature Not Enabled");
+    }
+
+    // Cohere carry: TNG drops GPU evidence on any non-2xx response, so cover
+    // the legacy path and the standard-base64 fallback through the router.
+    struct EchoAdditionalEvidence;
+
+    #[async_trait::async_trait]
+    impl protos::ttrpc::aa::attestation_agent_ttrpc::AttestationAgentService
+        for EchoAdditionalEvidence
+    {
+        async fn get_additional_evidence(
+            &self,
+            _ctx: &::ttrpc::r#async::TtrpcContext,
+            req: protos::ttrpc::aa::attestation_agent::GetAdditionalEvidenceRequest,
+        ) -> ::ttrpc::Result<protos::ttrpc::aa::attestation_agent::GetEvidenceResponse> {
+            ::ttrpc::Result::Ok(protos::ttrpc::aa::attestation_agent::GetEvidenceResponse {
+                Evidence: req.RuntimeData,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[rstest]
+    // TNG <= 0.7.0: legacy path, percent-encoded standard base64.
+    #[case("/aa/additional_evidence?runtime_data=%2B%2F8%3D&encoding=base64")]
+    // Upstream path with URL-safe no-pad base64.
+    #[case("/aa/additional-evidence?runtime_data=-_8&encoding=base64")]
+    #[tokio::test]
+    async fn additional_evidence_decodes_base64_runtime_data(#[case] uri: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = format!("unix://{}", dir.path().join("aa.sock").display());
+        let service = protos::ttrpc::aa::attestation_agent_ttrpc::create_attestation_agent_service(
+            std::sync::Arc::new(EchoAdditionalEvidence),
+        );
+        let mut server = ::ttrpc::r#async::Server::new()
+            .bind(&addr)
+            .unwrap()
+            .register_service(service);
+        server.start().await.unwrap();
+
+        let router = Router::new(
+            Some(AAClient::new(&addr).await.unwrap()),
+            None,
+            "attestation".to_string(),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.route(loopback(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(body.as_ref(), [0xfb, 0xff]);
+
+        server.shutdown().await.unwrap();
     }
 
     #[rstest]

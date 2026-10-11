@@ -4,6 +4,9 @@ on:
   push:
     branches:
     - main
+    # Cohere version branches: cohere-v<upstream release>.
+    - 'cohere-v*'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,15 +27,14 @@ jobs:
       matrix:
         platform: [
           { tee: none,        arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: none,        arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
-          { tee: none,        arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
           { tee: amd,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
           { tee: az-cvm-vtpm, arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
           { tee: tdx,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: cca,         arch: x86_64,  libc: musl, runner: ubuntu-24.04 },
-          { tee: cca,         arch: aarch64, libc: gnu, runner: ubuntu-24.04 },
-          { tee: se,          arch: s390x,   libc: gnu, runner: ubuntu-24.04-s390x },
-          { tee: none,        arch: powerpc64le,  libc: gnu, runner: ubuntu-24.04-ppc64le },
+          # Cohere fork: AA with TDX + SNP + Azure SNP-vTPM + NVIDIA GPU
+          # attesters. It links libtss2 + libnvat, so this variant must use gnu
+          # libc. The tarball bundles libnvat and its non-glibc dependencies;
+          # TSS2 comes from the consumer's image (tpm2-tools in the PodVM).
+          { tee: tdx-snp-nvidia,  arch: x86_64,  libc: gnu, runner: ubuntu-24.04 },
         ]
     runs-on: ${{ matrix.platform.runner }}
     env:
@@ -73,13 +75,18 @@ jobs:
         sudo apt-get update
 
     - name: Install tpm dependencies
-      if: matrix.platform.tee == 'az-cvm-vtpm'
+      # az-snp-vtpm-attester links against TSS2.
+      if: matrix.platform.tee == 'az-cvm-vtpm' || matrix.platform.tee == 'tdx-snp-nvidia'
       run: |
         sudo apt-get install -y --no-install-recommends libtss2-dev
 
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
+
+    - name: Install NVIDIA Attestation SDK
+      if: matrix.platform.tee == 'tdx-snp-nvidia'
+      uses: ./.github/actions/install-nvat-sdk
 
     - name: Build AA
       env:
@@ -98,7 +105,48 @@ jobs:
         mkdir oras
         cd oras
         cp ../target/${RUST_TARGET}/release/attestation-agent .
-        tar cJf attestation-agent.tar.xz attestation-agent
+        # For the tdx-snp-nvidia variant, bundle libnvat and the non-glibc
+        # shared libraries it needs, so consumers can install them with the
+        # binary. This is not the binary's whole closure: libtss2-esys,
+        # libtss2-tctildr and libtss2-mu (az-snp-vtpm-attester) are not bundled
+        # and must come from the consumer's image (tpm2-tools in the PodVM).
+        if [ "${TEE_PLATFORM}" = "tdx-snp-nvidia" ]; then
+          mkdir -p lib
+          libnvat="$(ldconfig -p | awk '$1 == "libnvat.so.1" { print $NF; exit }')"
+          if [ -z "${libnvat}" ]; then
+            echo "ERROR: libnvat.so not found after attestation-sdk install" >&2
+            exit 1
+          fi
+
+          cp -a "$(dirname "${libnvat}")"/libnvat.so* lib/
+          while read -r dependency; do
+            if [[ "${dependency}" == *"=>"* ]]; then
+              dependency_path="${dependency#*=> }"
+              dependency_path="${dependency_path%% *}"
+            else
+              dependency_path="${dependency%% *}"
+            fi
+
+            [ -f "${dependency_path}" ] || continue
+            dependency_name="$(basename "${dependency_path}")"
+            case "${dependency_name}" in
+              ld-linux-*|linux-vdso*|libc.so.*|libdl.so.*|libm.so.*|libpthread.so.*|librt.so.*|libutil.so.*|libresolv.so.*|libanl.so.*|libnss_*)
+                continue
+                ;;
+            esac
+            cp -L "${dependency_path}" "lib/${dependency_name}"
+          done < <(ldd "${libnvat}")
+
+          bundled_libnvat="$(LD_LIBRARY_PATH="${PWD}/lib" ldd attestation-agent \
+            | awk '$1 ~ /^libnvat\.so/ { print $3; exit }')"
+          if [[ "${bundled_libnvat}" != "${PWD}"/lib/* ]]; then
+            echo "ERROR: attestation-agent does not resolve bundled libnvat" >&2
+            exit 1
+          fi
+          tar cJf attestation-agent.tar.xz attestation-agent lib
+        else
+          tar cJf attestation-agent.tar.xz attestation-agent
+        fi
         arch="${ARCH}"
         # After building for target powerpc64le, tag and push the image as ppc64le to match standard arch naming.
         [ "$arch" = "powerpc64le" ] && arch="ppc64le"
@@ -133,22 +181,10 @@ jobs:
       matrix:
         arch:
         - x86_64
-        - s390x
-        - aarch64
-        - powerpc64le
         include:
         - arch: x86_64
           libc: musl
           instance: ubuntu-24.04
-        - arch: s390x
-          libc: gnu
-          instance: ubuntu-24.04-s390x
-        - arch: aarch64
-          libc: gnu
-          instance: ubuntu-24.04-arm
-        - arch: powerpc64le
-          libc: gnu
-          instance: ubuntu-24.04-ppc64le
     runs-on: ${{ matrix.instance }}
     env:
       LIBC: ${{ matrix.libc }}
