@@ -17,6 +17,7 @@ use tracing::{debug, info};
 type UrlSafeBase64 = Base64<serde_with::base64::UrlSafe>;
 
 pub fn detect_platform() -> bool {
+    let _tpm = tpm_lock();
     match is_snp_cvm() {
         Ok(is_snp) => is_snp,
         Err(err) => {
@@ -100,12 +101,22 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
     Ok(der)
 }
 
+// az-cvm-vtpm opens /dev/tpm0, which the kernel allows only one open of at a
+// time, so concurrent TPM calls fail instead of queueing.
+static TPM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn tpm_lock() -> std::sync::MutexGuard<'static, ()> {
+    TPM_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn get_evidence_sync(
     report_data: &[u8],
     cc_eventlog: Option<String>,
 ) -> anyhow::Result<TeeEvidence> {
-    let hcl_report = vtpm::get_report()?;
-    let tpm_quote = vtpm::get_quote(report_data)?.into();
+    let (hcl_report, tpm_quote) = {
+        let _tpm = tpm_lock();
+        (vtpm::get_report()?, vtpm::get_quote(report_data)?.into())
+    };
     let certs = imds::get_certs()?;
     let vcek = pem_to_der(&certs.vcek)?;
 
@@ -174,6 +185,7 @@ pub(crate) mod utils {
             bail!("Invalid PCR index: {pcr}");
         }
         info!("Extending PCR {} with {}", pcr, hex::encode(digest));
+        let _tpm = tpm_lock();
         vtpm::extend_pcr(pcr, digest)?;
 
         Ok(())
@@ -185,6 +197,7 @@ pub(crate) mod utils {
         if pcr_index > 23 {
             bail!("Invalid PCR index: {pcr_index}");
         }
+        let _tpm = tpm_lock();
         let tpm = Tpm::open().context("open TPM device")?;
         let (_, digest) = tpm
             .read_pcrs_sha256(&[pcr_index as u32])
