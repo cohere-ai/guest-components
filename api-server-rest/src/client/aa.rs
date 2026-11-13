@@ -21,6 +21,8 @@ pub const AA_ROOT: &str = "/aa";
 pub const AA_TOKEN_URL: &str = "/token";
 pub const AA_EVIDENCE_URL: &str = "/evidence";
 pub const AA_ADDITIONAL_EVIDENCE_URL: &str = "/additional-evidence";
+/// The Cohere fork's path, still called by TNG.
+pub const AA_ADDITIONAL_EVIDENCE_LEGACY_URL: &str = "/additional_evidence";
 pub const AA_AAEL_URL: &str = "/aael";
 
 pub struct AAClient {
