@@ -32,6 +32,6 @@ runs:
         rm -rf "${tmpdir}"
 
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends "libnvat-dev=${NVAT_VERSION}*"
+        sudo apt-get install -y --no-install-recommends "libnvat=${NVAT_VERSION}*" "libnvat-dev=${NVAT_VERSION}*"
 
         echo "NVAT_USE_SYSTEM_LIB=1" >> "$GITHUB_ENV"
