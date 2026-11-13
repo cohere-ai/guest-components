@@ -10,10 +10,16 @@
 # guest rootfs they are mounted into. UBUNTU_VERSION selects that release, so
 # one recipe covers every variant we publish. Mirrors kata-containers'
 # coco-guest-components static-build Dockerfile.
+#
+# UBUNTU_DIGEST is the multi-arch index digest of ubuntu:${UBUNTU_VERSION} and
+# must be overridden together with UBUNTU_VERSION.
 ARG UBUNTU_VERSION=26.04
-FROM ubuntu:${UBUNTU_VERSION}
+ARG UBUNTU_DIGEST=6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+FROM ubuntu:${UBUNTU_VERSION}@sha256:${UBUNTU_DIGEST}
 
 ARG RUST_TOOLCHAIN
+# Bumping UMOCI_VERSION requires updating the per-arch hashes below, taken
+# from the release's signed umoci.sha256sum.
 ARG UMOCI_VERSION=v0.6.0
 ARG TARGETARCH
 
@@ -25,8 +31,10 @@ ENV LIBC=gnu
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}"
+RUN mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}/bin"
 
+# Ubuntu 24.04's rustup (1.26) expects ${CARGO_HOME}/bin/rustup to exist when
+# updating proxies, even though the archive package installs into /usr/bin.
 RUN apt-get update && \
 	apt-get install -y --no-install-recommends \
 		binutils \
@@ -48,13 +56,25 @@ RUN apt-get update && \
 		perl \
 		pkg-config \
 		protobuf-compiler \
+		rustup \
 		skopeo && \
 	apt-get clean && rm -rf /var/lib/apt/lists/* && \
-	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-		sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" && \
-	curl -fsSL -o /usr/local/bin/umoci \
+	ln -s /usr/bin/rustup "${CARGO_HOME}/bin/rustup" && \
+	rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --no-self-update && \
+	rustup default "${RUST_TOOLCHAIN}"
+
+RUN case "${TARGETARCH}" in \
+		amd64) umoci_sha256=b51c267ec394499e42c6fde47f240b7b7dba57ea49df0b5acd304378b82a3b71 ;; \
+		arm64) umoci_sha256=5cfd17f2e7a4bcf9ed67ea1b955ca893d200349b9ce6a3d3707dba415f458a1f ;; \
+		s390x) umoci_sha256=abe2282c6d49a7289f381b9572a01f4d4079919a41fadaca67047a5015cc0e0a ;; \
+		*) echo "no pinned umoci hash for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+	esac && \
+	tmpdir="$(mktemp -d)" && \
+	curl -fsSL -o "${tmpdir}/umoci" \
 		"https://github.com/opencontainers/umoci/releases/download/${UMOCI_VERSION}/umoci.linux.${TARGETARCH}" && \
-	chmod +x /usr/local/bin/umoci
+	echo "${umoci_sha256}  ${tmpdir}/umoci" | sha256sum -c - && \
+	install -m 0755 "${tmpdir}/umoci" /usr/local/bin/umoci && \
+	rm -rf "${tmpdir}"
 
 # nv-attestation-sdk-sys looks for the C header at /usr/include/nvat.h, but
 # cmake installs it under /usr/local/include, hence the symlink below.
@@ -94,4 +114,4 @@ RUN ARCH="$(uname -m)"; \
 
 # assemble-rootfs.sh runs as the invoking uid so the build artefacts stay
 # writable on the host bind mount; that uid still needs the toolchain.
-RUN chmod -R a+rwX "${RUSTUP_HOME}" "${CARGO_HOME}"
+RUN find "${RUSTUP_HOME}" "${CARGO_HOME}" -not -type l -exec chmod a+rwX {} +

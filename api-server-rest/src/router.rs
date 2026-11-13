@@ -14,8 +14,8 @@ use tracing::{debug, error, info};
 use crate::VERSION;
 use crate::client::{
     aa::{
-        AA_AAEL_URL, AA_ADDITIONAL_EVIDENCE_URL, AA_EVIDENCE_URL, AA_ROOT, AA_TOKEN_URL, AAClient,
-        AaelEvent,
+        AA_AAEL_URL, AA_ADDITIONAL_EVIDENCE_LEGACY_URL, AA_ADDITIONAL_EVIDENCE_URL,
+        AA_EVIDENCE_URL, AA_ROOT, AA_TOKEN_URL, AAClient, AaelEvent,
     },
     cdh::{CDH_RESOURCE_URL, CDH_ROOT, CDHClient},
 };
@@ -194,7 +194,10 @@ impl Router {
                                 None => return self.bad_request(),
                             }
                         }
-                        (AA_ADDITIONAL_EVIDENCE_URL, &Method::GET) => {
+                        (
+                            AA_ADDITIONAL_EVIDENCE_URL | AA_ADDITIONAL_EVIDENCE_LEGACY_URL,
+                            &Method::GET,
+                        ) => {
                             info!("Get additional evidence");
                             match params.get("runtime_data") {
                                 Some(runtime_data) => {
