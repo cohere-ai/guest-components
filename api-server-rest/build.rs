@@ -32,7 +32,7 @@ fn _token() {}
     path = "/aa/evidence",
     params(
         ("runtime_data" = String, Query, description = "Runtime Data"),
-        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe base64 (no padding)")
+        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe or standard base64")
     ),
     responses(
         (status = 200, description = "success response",
@@ -52,7 +52,7 @@ fn _evidence() {}
     path = "/aa/additional-evidence",
     params(
         ("runtime_data" = String, Query, description = "Runtime Data"),
-        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe base64 (no padding)")
+        ("encoding" = Option<String>, Query, description = "Runtime data encoding; use `base64` for URL-safe or standard base64")
     ),
     responses(
         (status = 200, description = "success response",

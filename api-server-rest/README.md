@@ -13,7 +13,7 @@ $ curl http://127.0.0.1:8006/cdh/resource/default/key/1
 $ curl http://127.0.0.1:8006/aa/evidence\?runtime_data\=xxxx
 {"svn":"1","report_data":"eHh4eA=="}
 
-# When runtime_data is URL-safe base64, pass encoding=base64
+# When runtime_data is URL-safe or standard base64, pass encoding=base64
 $ curl "http://127.0.0.1:8006/aa/evidence?runtime_data=eHh4eA&encoding=base64"
 {"svn":"1","report_data":"eHh4eA=="}
 
