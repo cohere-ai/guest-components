@@ -22,11 +22,18 @@ name: Build and publish the CoCo guest extension image
 # multi-arch manifests get the version tag, and the per-arch disk images and
 # their dm-verity root hashes are attached to the GitHub release so consumers
 # (e.g. kata-containers) can pin to a stable version.
+#
+# Pushes to cohere-kata-* branches and tags publish like main, tagged with the
+# branch or tag name instead of "latest", so a Kata release can pin the
+# extension by digest. Other cohere* branches serve CAA and do not publish it.
 on:
   pull_request:
   push:
     branches:
     - main
+    - "cohere-kata-*"
+    tags:
+    - "cohere-kata-*"
   release:
     types: [published]
 
@@ -78,10 +85,11 @@ jobs:
         ubuntu:
         - "24.04"
         - "26.04"
+        # No s390x: this fork has no s390x runner, so those jobs queue until
+        # they time out and the manifests are never published.
         arch:
         - x86_64
         - aarch64
-        - s390x
         include:
         # Multi-arch index digests of the ubuntu:<release> base images.
         - ubuntu: "24.04"
@@ -98,11 +106,6 @@ jobs:
           libc: gnu
           attester: cca-attester
           runner: ubuntu-24.04-arm
-        - arch: s390x
-          oci_arch: s390x
-          libc: gnu
-          attester: se-attester
-          runner: s390x
     runs-on: ${{ matrix.runner }}
     env:
       ARCH: ${{ matrix.arch }}
@@ -339,20 +342,19 @@ jobs:
     - name: Assemble multi-arch manifests
       env:
         # On push to main: the commit sha plus the rolling "latest" tag.
+        # On push to a cohere-kata-* branch or tag: the commit sha plus its name.
         # On release: the commit sha plus the immutable release version, so
         # consumers can pin to it.
-        EXTRA_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || 'latest' }}
+        EXTRA_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || (github.ref_name == 'main' && 'latest' || github.ref_name) }}
         GIT_SHA: ${{ github.sha }}
       run: |
         for image in "${CONTAINER_IMAGE}" "${DISK_IMAGE}"; do
           for tag in "${GIT_SHA}-${VARIANT}" "${EXTRA_TAG}-${VARIANT}"; do
             docker manifest create "${image}:${tag}" \
               --amend "${image}:${GIT_SHA}-${VARIANT}-amd64" \
-              --amend "${image}:${GIT_SHA}-${VARIANT}-arm64" \
-              --amend "${image}:${GIT_SHA}-${VARIANT}-s390x"
+              --amend "${image}:${GIT_SHA}-${VARIANT}-arm64"
             docker manifest annotate --arch amd64 --os linux "${image}:${tag}" "${image}:${GIT_SHA}-${VARIANT}-amd64"
             docker manifest annotate --arch arm64 --os linux "${image}:${tag}" "${image}:${GIT_SHA}-${VARIANT}-arm64"
-            docker manifest annotate --arch s390x --os linux "${image}:${tag}" "${image}:${GIT_SHA}-${VARIANT}-s390x"
             docker manifest push "${image}:${tag}"
           done
         done
