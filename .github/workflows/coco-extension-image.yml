@@ -22,13 +22,19 @@ name: Build and publish the CoCo guest extension image
 # multi-arch manifests get the version tag, and the per-arch disk images and
 # their dm-verity root hashes are attached to the GitHub release so consumers
 # (e.g. kata-containers) can pin to a stable version.
+#
+# Cohere: pushes to cohere-v* version branches publish like main, but only the
+# "<sha>-<variant>" tags, which kata-containers pins by digest. A manual run
+# does the same from any branch, to test an upgrade branch before it merges.
 on:
   pull_request:
   push:
     branches:
     - main
-  # Cohere carry: the fork doesn't ship the coco-extension image, so a Cohere
-  # release (v<X.Y.Z>-cohere.<N>) must not publish it or attach disk images.
+    - "cohere-v*"
+  workflow_dispatch:
+  # Cohere carry: consumers pin the cohere-v* SHA builds, so a Cohere release
+  # (v<X.Y.Z>-cohere.<N>) must not publish the extension or attach disk images.
   # release:
   #   types: [published]
 
@@ -343,11 +349,16 @@ jobs:
         # On push to main: the commit sha plus the rolling "latest" tag.
         # On release: the commit sha plus the immutable release version, so
         # consumers can pin to it.
-        EXTRA_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || 'latest' }}
+        # Otherwise (cohere-v* pushes, manual runs): the commit sha only.
+        EXTRA_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'latest' || '') }}
         GIT_SHA: ${{ github.sha }}
       run: |
+        tags=("${GIT_SHA}-${VARIANT}")
+        if [ -n "${EXTRA_TAG}" ]; then
+          tags+=("${EXTRA_TAG}-${VARIANT}")
+        fi
         for image in "${CONTAINER_IMAGE}" "${DISK_IMAGE}"; do
-          for tag in "${GIT_SHA}-${VARIANT}" "${EXTRA_TAG}-${VARIANT}"; do
+          for tag in "${tags[@]}"; do
             docker manifest create "${image}:${tag}" \
               --amend "${image}:${GIT_SHA}-${VARIANT}-amd64" \
               --amend "${image}:${GIT_SHA}-${VARIANT}-arm64"

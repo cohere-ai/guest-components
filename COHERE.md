@@ -29,7 +29,7 @@ releases.
 Version branches can publish artifacts to `ghcr.io/cohere-ai/guest-components/*`
 on every push, tagged with the commit SHA, if they carry a patch that adds the
 push trigger. `cohere-v0.22.0` publishes the attestation-agent variants;
-`cohere-v0.23.1` publishes nothing yet.
+`cohere-v0.23.1` publishes the CoCo guest extension.
 
 cloud-api-adaptor uses the attestation-agent variants that `publish-artifacts`
 builds on `cohere-v0.22.0`, and pins guest-components by that SHA in
@@ -37,6 +37,12 @@ builds on `cohere-v0.22.0`, and pins guest-components by that SHA in
 `publish-artifacts` with `release-binaries` in v0.23.0, so the patch has to be
 rewritten and tested against cloud-api-adaptor before cloud-api-adaptor moves
 to it.
+
+kata-containers uses the CoCo guest extension that `coco-extension-image`
+builds on `cohere-v0.23.1`. Its release resolves the
+`coco-extension-disk:<sha>-<variant>-<arch>` tag, pins that image's
+`@sha256:` digest and verifies the build provenance. `coco-extension-image` can also be run manually from any branch;
+those builds are tagged with their commit SHA too.
 
 On `cohere-v0.22.0`, `publish-artifacts` can also be run manually
 (`workflow_dispatch`) from any branch, for example to test an upgrade branch
