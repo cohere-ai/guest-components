@@ -21,6 +21,9 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    # Cohere carry: images push to confidential-containers/staged-images, which
+    # the fork can't write to, so a Cohere release must skip this workflow.
+    if: github.repository_owner == 'confidential-containers'
     permissions:
       contents: read
       packages: write # push container images to ghcr.io

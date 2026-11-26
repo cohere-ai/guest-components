@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
-  release:
-    types: [published]
+  # Cohere carry: a Cohere release (v<X.Y.Z>-cohere.<N>) must not publish
+  # secret-cli (including `latest`) or attach a vendored tarball.
+  # release:
+  #   types: [published]
   pull_request:
   workflow_dispatch:
     inputs:

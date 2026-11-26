@@ -204,6 +204,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shadow-rs",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
