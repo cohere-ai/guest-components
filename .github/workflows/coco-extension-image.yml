@@ -68,7 +68,7 @@ env:
   # This should also correspond to the nv-attestation-sdk crate version set
   # in the attester Cargo.toml. The crate and the package version use different
   # version schemes, but should be compatible across major releases.
-  NVAT_VERSION: "2.0.0"
+  NVAT_VERSION: "2.0.0.1790976895-1"
 
 jobs:
   build:
