@@ -197,9 +197,9 @@ jobs:
             reference="${image}:${HEAD_SHA}-${variant}"
             docker manifest create "${reference}" \
               --amend "${reference}-amd64" \
-              --amend "${reference}-arm64" \
-              --amend "${reference}-s390x"
-            for arch in amd64 arm64 s390x; do
+              --amend "${reference}-arm64"
+              # --amend "${reference}-s390x"
+            for arch in amd64 arm64; do
               docker manifest annotate --arch "${arch}" --os linux "${reference}" "${reference}-${arch}"
             done
             docker manifest push "${reference}"
