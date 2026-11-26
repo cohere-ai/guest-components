@@ -23,6 +23,8 @@ ARG RUST_TOOLCHAIN
 # from the release's signed umoci.sha256sum.
 ARG UMOCI_VERSION=v0.6.0
 ARG TARGETARCH
+# Bumping CUDA_KEYRING_VERSION requires updating the per-repository hashes
+# below. apt then verifies libnvat against the keyring's signing key.
 ARG CUDA_KEYRING_VERSION=1.1-1
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -77,23 +79,24 @@ RUN case "${TARGETARCH}" in \
 	install -m 0755 "${tmpdir}/umoci" /usr/local/bin/umoci && \
 	rm -rf "${tmpdir}"
 
-# NVAT_VERSION: libnvat/libnvat-dev version; keep in sync with install-nvat-sdk/action.yml.
+# NVAT_VERSION: exact libnvat/libnvat-dev package version; keep in sync with install-nvat-sdk/action.yml.
 ARG NVAT_VERSION
 RUN if [ "$(uname -m)" = "x86_64" ] && [ -n "${NVAT_VERSION}" ]; then \
 	case "${UBUNTU_VERSION}" in \
-		24.04) nv_repo=ubuntu2404 ;; \
-		26.04) nv_repo=ubuntu2604 ;; \
+		24.04) nv_repo=ubuntu2404; keyring_sha256=d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba ;; \
+		26.04) nv_repo=ubuntu2604; keyring_sha256=f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e ;; \
 		*) echo "no NVIDIA apt repository known for Ubuntu ${UBUNTU_VERSION}" >&2; exit 1 ;; \
 	esac && \
 	tmpdir="$(mktemp -d)" && \
 	curl -fsSL -o "${tmpdir}/cuda-keyring.deb" \
 		"https://developer.download.nvidia.com/compute/cuda/repos/${nv_repo}/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}_all.deb" && \
+	echo "${keyring_sha256}  ${tmpdir}/cuda-keyring.deb" | sha256sum -c - && \
 	dpkg -i "${tmpdir}/cuda-keyring.deb" && \
 	rm -rf "${tmpdir}" && \
 	apt-get update && \
 	apt-get install -y --no-install-recommends \
-		"libnvat=${NVAT_VERSION}*" \
-		"libnvat-dev=${NVAT_VERSION}*" && \
+		"libnvat=${NVAT_VERSION}" \
+		"libnvat-dev=${NVAT_VERSION}" && \
 	apt-get clean && rm -rf /var/lib/apt/lists/*; \
 	fi
 
